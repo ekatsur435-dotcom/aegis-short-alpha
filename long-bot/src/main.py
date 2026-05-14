@@ -654,6 +654,18 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         price_trend   = state.pattern_detector._get_price_trend(ohlcv_15m)
         patterns      = state.pattern_detector.detect_all(ohlcv_15m, hourly_deltas, md)
 
+        # 🆕 Паттерны на 30M — уже загружены, просто запускаем detect_all
+        # Вес 1.15x (между 15m и 4H) — более структурные чем 15m
+        if ohlcv_30m and len(ohlcv_30m) >= 20:
+            try:
+                _pat_30m = state.pattern_detector.detect_all(ohlcv_30m, None, md)
+                for _p in _pat_30m:
+                    _p.score_bonus = int(_p.score_bonus * 1.15)
+                    _p.name = f"{_p.name}_30M"
+                patterns = patterns + _pat_30m
+            except Exception:
+                pass
+
         # ✅ v18: HTF паттерны на 4H и 1D (более значимые сигналы)
         # Паттерн на 4H весит больше т.к. структурно значим
         _ms_data = getattr(md, "market_structure", None)
@@ -690,7 +702,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         _seen_base = set()
         _dedup = []
         for _p in sorted(patterns, key=lambda x: x.score_bonus, reverse=True):
-            _base = _p.name.replace("_4H","").replace("_1D","")
+            _base = _p.name.replace("_4H","").replace("_1D","").replace("_30M","")
             if _base not in _seen_base:
                 _seen_base.add(_base)
                 _dedup.append(_p)
@@ -723,15 +735,6 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 if verbose:
                     print(f"{log_prefix} ⚠️ [WYCKOFF→PATTERN] {_wy_e}")
 
-        p4d = 0.0
-        try:
-            klines = await state.binance.get_klines(symbol, "1d", 6)
-            if klines and len(klines) >= 5:
-                p4d = round((klines[-1].close - klines[-5].close) / klines[-5].close * 100, 2)
-        except Exception:
-            p4d = md.price_change_24h * 4
-
-
         # OKX Liquidations fallback — ПЕРЕД скорером
         if md.recent_liquidations_usd is None or md.liq_side is None:
             try:
@@ -747,15 +750,22 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
 
         # Multi-TF RSI и OI для scorer
         _rsi_15m = _calc_rsi_l(ohlcv_15m) if ohlcv_15m else None
+        _oi_15m  = getattr(md, 'oi_change_15m', 0.0) or 0.0
+        _oi_30m  = getattr(md, 'oi_change_30m', 0.0) or 0.0
         _oi_1h   = getattr(md, 'oi_change_1h', 0.0) or 0.0
         _oi_4h   = getattr(md, 'oi_change_4h', 0.0) or 0.0
-        _oi_30m  = getattr(md, 'oi_change_30m', 0.0) or 0.0
         _p1h     = getattr(md, 'price_change_1h', 0.0) or 0.0
         _vol_sp  = getattr(md, 'volume_spike_ratio', 1.0) or 1.0
         # HTF structure и zone из market_structure
         _ms_s    = getattr(md, 'market_structure', None)
         _htf_str = getattr(_ms_s, 'htf_structure', '') or ''
         _zone    = getattr(_ms_s, 'zone_4h', '') or ''
+        # 30M delta — вычисляем из уже загруженных 30m свечей (без доп. API вызова)
+        _delta_30m = []
+        if ohlcv_30m:
+            for _c in ohlcv_30m[-14:]:
+                _pdp = (_c.close - _c.open) / _c.open if _c.open > 0 else 0
+                _delta_30m.append(_c.quote_volume * (1 if _pdp >= 0 else -1))
         # Momentum Mode: RSI в зоне разгона + цена растёт + OI подтверждает + объём
         _momentum_mode = (
             55 <= (md.rsi_1h or 50) <= 72 and
@@ -771,8 +781,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             funding_current=md.funding_rate,
             funding_accumulated=md.funding_accumulated,
             long_ratio=md.long_short_ratio,
-            oi_change_4d=md.oi_change_4d,
-            price_change_4d=p4d,
+            price_change_24h=md.price_change_24h,
             hourly_deltas=hourly_deltas,
             price_trend=price_trend,
             patterns=patterns,
@@ -782,15 +791,17 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             top_trader_ratio=getattr(md, "top_trader_long_short_ratio", None),
             taker_ratio=getattr(md, "taker_buy_sell_ratio", None),
             btc_change_1h=state.btc_change_1h or 0.0,
+            oi_15m=_oi_15m,
+            oi_30m=_oi_30m,
             oi_1h=_oi_1h,
             oi_4h=_oi_4h,
-            oi_30m=_oi_30m,
             rsi_15m=_rsi_15m,
             rsi_30m=rsi_30m,
             rsi_4h=rsi_4h,
             htf_structure=_htf_str,
             zone=_zone,
             momentum_mode=_momentum_mode,
+            delta_30m=_delta_30m,
         )
 
         # Fear & Greed макро-модификатор — применяем ДО проверки is_valid
@@ -1048,10 +1059,10 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 "RSI":      f"{md.rsi_1h:.1f}" if md.rsi_1h else "N/A",
                 "Funding":  f"{md.funding_rate:+.3f}%",
                 "L/S":      f"{md.long_short_ratio:.0f}% longs",
-                "OI 4d":    f"{md.oi_change_4d:+.1f}%",
+                "OI 15m":    f"{getattr(md,'oi_change_15m',0.0):+.1f}%",
                 "OI 1h":    f"{getattr(md,'oi_change_1h',0.0):+.1f}%",
                 "OI 4h":    f"{getattr(md,'oi_change_4h',0.0):+.1f}%",
-                "Price 4d": f"{p4d:+.1f}%",
+                "Price 24h": f"{md.price_change_24h:+.1f}%",
             },
             "aegis_components": aegis_components,
             "dca_grid":     dca_grid_info,
@@ -1064,7 +1075,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             # Compatibility
             "rsi_1h":           round(md.rsi_1h or 0, 1),
             "funding_rate":     round(md.funding_rate, 4),
-            "oi_change":        round(md.oi_change_4d, 2),
+            "oi_change":        round(getattr(md, 'oi_change_1h', 0.0), 2),
             "long_short_ratio": round(md.long_short_ratio, 1),
             "volume_spike_ratio": round(getattr(md, "volume_spike_ratio", 1.0), 2),
             "atr_14_pct":       round(getattr(md, "atr_14_pct", 0.5), 3),

@@ -600,9 +600,17 @@ def proximity_bonus(price: float, ms: MarketStructureResult, direction: str) -> 
         if _near(ms.crt_4h_low, 0.7):
             bonus += 5; reasons.append("Near CRT 4H Low +5")
 
-        # POC как магнит снизу
+        # POC 4H как магнит снизу
         if ms.poc_4h > 0 and price < ms.poc_4h and _near(ms.poc_4h, 1.0):
             bonus += 4; reasons.append("Below POC 4H (magnetic) +4")
+        elif ms.poc_4h > 0 and price > ms.poc_4h * 1.005:
+            bonus -= 3; reasons.append("Above POC 4H (extended, bad long entry) -3")
+
+        # POC 1D — дневной уровень справедливой стоимости
+        if ms.poc_1d > 0 and price < ms.poc_1d and _near(ms.poc_1d, 1.5):
+            bonus += 5; reasons.append(f"Below POC 1D (daily value) +5")
+        elif ms.poc_1d > 0 and price > ms.poc_1d * 1.01:
+            bonus -= 2; reasons.append("Above POC 1D (premium, bad long) -2")
 
         # Bullish OB 4H / 1D
         if ms.has_ob_4h and ms.ob_bullish_4h:
@@ -668,6 +676,22 @@ def proximity_bonus(price: float, ms: MarketStructureResult, direction: str) -> 
         # CRT 4H High (сопротивление)
         if _near(ms.crt_4h_high, 0.7):
             bonus += 5; reasons.append("Near CRT 4H High +5")
+
+        # POC 4H — цена выше POC = в зоне перекупленности (шорт из хаёв)
+        if ms.poc_4h > 0 and price > ms.poc_4h * 1.005:
+            bonus += 5; reasons.append(f"Above POC 4H (extended, short zone) +5")
+        elif ms.poc_4h > 0 and _near(ms.poc_4h, 0.5):
+            bonus += 2; reasons.append(f"At POC 4H (fair value) +2")
+        elif ms.poc_4h > 0 and price < ms.poc_4h * 0.995:
+            bonus -= 3; reasons.append("Below POC 4H (discount, risky short) -3")
+
+        # POC 1D — цена выше дневного POC = хорошее место для шорта
+        if ms.poc_1d > 0 and price > ms.poc_1d * 1.01:
+            bonus += 4; reasons.append(f"Above POC 1D (daily premium) +4")
+        elif ms.poc_1d > 0 and _near(ms.poc_1d, 1.0):
+            bonus += 1; reasons.append(f"Near POC 1D +1")
+        elif ms.poc_1d > 0 and price < ms.poc_1d * 0.99:
+            bonus -= 2; reasons.append("Below POC 1D (discount, bad short) -2")
 
         # Bearish OB 4H
         if ms.has_ob_4h and ms.ob_bearish_4h:

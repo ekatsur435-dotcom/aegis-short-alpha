@@ -403,7 +403,8 @@ class ShortScorer(BaseScorer):
         return ScoreComponent("OI", min(score, 15), 15, " | ".join(reasons) or "Нейтральный OI", oi_15m)
 
     def calculate_delta_component(self, hourly_deltas: List[float],
-                                   price_trend: str) -> ScoreComponent:
+                                   price_trend: str,
+                                   delta_30m: Optional[List[float]] = None) -> ScoreComponent:
         score, reasons = 0, []
         if not hourly_deltas:
             return ScoreComponent("Delta", 0, 20, "Нет данных дельты", 0)
@@ -417,6 +418,14 @@ class ShortScorer(BaseScorer):
             score += 8; reasons.append("Слабая медвежья дивергенция")
         elif price_trend == "sideways" and neg_hours >= 4:
             score += 6; reasons.append("Распределение в боковике")
+        # 30M быстрая дельта — агрессия продавцов прямо сейчас
+        if delta_30m and len(delta_30m) >= 2:
+            recent = delta_30m[-4:]  # последние 2 часа по 30m
+            neg_30m = sum(1 for d in recent if d < 0)
+            if neg_30m >= 3:
+                score += 5; reasons.append(f"30m дельта: {neg_30m}/4 негат. — продавцы сейчас")
+            elif neg_30m >= 2:
+                score += 2; reasons.append(f"30m дельта: {neg_30m}/4 негат.")
         return ScoreComponent("Delta", min(score, 20), 20, " | ".join(reasons) or "Нейтральная дельта",
                               sum(hourly_deltas))
 
@@ -443,7 +452,8 @@ class ShortScorer(BaseScorer):
                         rsi_15m: float = None, rsi_30m: float = None, rsi_4h: float = None,
                         oi_15m: float = 0.0, oi_30m: float = 0.0,
                         oi_1h: float = 0.0, oi_4h: float = 0.0,
-                        htf_structure: str = "", zone: str = "") -> ScoreResult:
+                        htf_structure: str = "", zone: str = "",
+                        delta_30m: Optional[List[float]] = None) -> ScoreResult:
         if hourly_deltas is None:
             hourly_deltas = []
         if patterns is None:
@@ -454,7 +464,7 @@ class ShortScorer(BaseScorer):
         components.append(self.calculate_htf_zone_component(htf_structure, zone, "short"))
         components.append(self.calculate_ratio_component(long_ratio))
         components.append(self.calculate_oi_component(oi_15m, oi_30m, oi_1h, oi_4h, price_change_24h))
-        components.append(self.calculate_delta_component(hourly_deltas, price_trend))
+        components.append(self.calculate_delta_component(hourly_deltas, price_trend, delta_30m=delta_30m))
         pat_comp, pat_names = self.calculate_pattern_component(patterns)
         components.append(pat_comp)
         components.append(self.calculate_top_trader_component(top_trader_ratio, "short"))
@@ -593,7 +603,8 @@ class LongScorer(BaseScorer):
     def calculate_delta_component(self, hourly_deltas: List[float],
                                    price_trend: str,
                                    btc_change_1h: float = 0.0,
-                                   coin_change_1h: float = 0.0) -> ScoreComponent:
+                                   coin_change_1h: float = 0.0,
+                                   delta_30m: Optional[List[float]] = None) -> ScoreComponent:
         score, reasons = 0, []
         if not hourly_deltas:
             return ScoreComponent("Delta", 0, 20, "Нет данных дельты", 0)
@@ -609,13 +620,20 @@ class LongScorer(BaseScorer):
         elif price_trend == "sideways" and pos_hours >= 4:
             score += 6; reasons.append("Накопление в боковике")
         # ✅ FIX #5: Относительная слабость vs BTC — монета падает сильнее BTC при общем росте
-        # Признак накопления: дельта бычья, но монета отстаёт от BTC (возможна ротация)
         elif price_trend == "rising" and btc_change_1h > 0 and pos_hours >= 3:
             relative_weakness = btc_change_1h - coin_change_1h
             if relative_weakness > 1.0:
                 score += 10; reasons.append(f"Относит. слабость vs BTC (+{btc_change_1h:.1f}% vs +{coin_change_1h:.1f}%) — накопление при росте рынка")
             elif relative_weakness > 0.5:
                 score += 6; reasons.append(f"Умеренная слабость vs BTC — дельта растёт")
+        # 30M быстрая дельта — покупатели агрессивны прямо сейчас?
+        if delta_30m and len(delta_30m) >= 2:
+            recent = delta_30m[-4:]  # последние 2 часа по 30m
+            pos_30m = sum(1 for d in recent if d > 0)
+            if pos_30m >= 3:
+                score += 5; reasons.append(f"30m дельта: {pos_30m}/4 позит. — покупатели сейчас")
+            elif pos_30m >= 2:
+                score += 2; reasons.append(f"30m дельта: {pos_30m}/4 позит.")
         return ScoreComponent("Delta", min(score, 20), 20, " | ".join(reasons) or "Нейтральная дельта",
                               sum(hourly_deltas))
 
@@ -652,7 +670,8 @@ class LongScorer(BaseScorer):
                         oi_15m: float = 0.0, oi_30m: float = 0.0,
                         oi_1h: float = 0.0, oi_4h: float = 0.0,
                         htf_structure: str = "", zone: str = "",
-                        momentum_mode: bool = False) -> ScoreResult:
+                        momentum_mode: bool = False,
+                        delta_30m: Optional[List[float]] = None) -> ScoreResult:
         if hourly_deltas is None:
             hourly_deltas = []
         if patterns is None:
@@ -663,7 +682,7 @@ class LongScorer(BaseScorer):
         components.append(self.calculate_htf_zone_component(htf_structure, zone, "long"))
         components.append(self.calculate_ratio_component(long_ratio))
         components.append(self.calculate_oi_component(oi_15m, oi_30m, oi_1h, oi_4h, price_change_24h))
-        components.append(self.calculate_delta_component(hourly_deltas, price_trend, btc_change_1h=btc_change_1h, coin_change_1h=price_change_1h))
+        components.append(self.calculate_delta_component(hourly_deltas, price_trend, btc_change_1h=btc_change_1h, coin_change_1h=price_change_1h, delta_30m=delta_30m))
         pat_comp, pat_names = self.calculate_pattern_component(patterns)
         components.append(pat_comp)
         components.append(self.calculate_top_trader_component(top_trader_ratio, "long"))

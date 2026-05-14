@@ -636,6 +636,18 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         price_trend   = state.pattern_detector._get_price_trend(ohlcv_15m)
         patterns      = state.pattern_detector.detect_all(ohlcv_15m, hourly_deltas, md)
 
+        # 🆕 Паттерны на 30M — уже загружены, просто запускаем detect_all
+        # Вес 1.15x (между 15m и 4H) — более структурные чем 15m
+        if ohlcv_30m and len(ohlcv_30m) >= 20:
+            try:
+                _pat_30m = state.pattern_detector.detect_all(ohlcv_30m, None, md)
+                for _p in _pat_30m:
+                    _p.score_bonus = int(_p.score_bonus * 1.15)
+                    _p.name = f"{_p.name}_30M"
+                patterns = patterns + _pat_30m
+            except Exception:
+                pass
+
         # ✅ v18: HTF паттерны на 4H и 1D (более значимые сигналы)
         # Паттерн на 4H весит больше т.к. структурно значим
         _ms_data = getattr(md, "market_structure", None)
@@ -672,7 +684,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         _seen_base = set()
         _dedup = []
         for _p in sorted(patterns, key=lambda x: x.score_bonus, reverse=True):
-            _base = _p.name.replace("_4H","").replace("_1D","")
+            _base = _p.name.replace("_4H","").replace("_1D","").replace("_30M","")
             if _base not in _seen_base:
                 _seen_base.add(_base)
                 _dedup.append(_p)
@@ -728,6 +740,12 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         _ms_s    = getattr(md, 'market_structure', None)
         _htf_str = getattr(_ms_s, 'htf_structure', '') or ''
         _zone    = getattr(_ms_s, 'zone_4h', '') or ''
+        # 30M delta — вычисляем из уже загруженных 30m свечей (без доп. API вызова)
+        _delta_30m = []
+        if ohlcv_30m:
+            for _c in ohlcv_30m[-14:]:
+                _pdp = (_c.close - _c.open) / _c.open if _c.open > 0 else 0
+                _delta_30m.append(_c.quote_volume * (1 if _pdp >= 0 else -1))
 
         base_result = state.scorer.calculate_score(
             rsi_1h=md.rsi_1h or 50,
@@ -751,6 +769,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             rsi_4h=rsi_4h,
             htf_structure=_htf_str,
             zone=_zone,
+            delta_30m=_delta_30m,
         )
 
         # Fear & Greed макро-модификатор — применяем ДО проверки is_valid
