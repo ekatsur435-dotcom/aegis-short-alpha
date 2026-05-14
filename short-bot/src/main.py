@@ -1497,11 +1497,9 @@ async def _startup_sl_sync():
     """
     🚨 FIX: SL=0.000000 bug — синхронизация при старте.
 
-    После запуска бота проверяем все BingX позиции.
-    Для каждой позиции без SL (stopLoss=0) ставим аварийный SL
-    на основе точки входа + SL_BUFFER из конфига.
-
-    Запускается 1 раз через 10 секунд после старта.
+    SHORT бот обрабатывает ТОЛЬКО SHORT позиции.
+    LONG позиции — ответственность long-bot.
+    Защита от дублирования через Redis-ключ (TTL 10 мин).
     """
     await asyncio.sleep(10)  # Ждём инициализации всех компонентов
 
@@ -1509,7 +1507,7 @@ async def _startup_sl_sync():
         print("[SL-SYNC] AutoTrader не инициализирован — пропускаем")
         return
 
-    print("[SL-SYNC] 🔍 Проверка SL на всех BingX позициях...")
+    print("[SL-SYNC] 🔍 Проверка SL на SHORT BingX позициях...")
     try:
         positions = await state.auto_trader.bingx.get_positions()
         if not positions:
@@ -1519,17 +1517,30 @@ async def _startup_sl_sync():
         fixed = 0
         skipped = 0
         for p in positions:
+            # ✅ FIX: SHORT бот трогает ТОЛЬКО SHORT позиции
+            if p.position_side != "SHORT":
+                continue
+
             sym = p.symbol  # уже в формате "BTC-USDT"
-            direction = "long" if p.position_side == "LONG" else "short"
+            direction = "short"
             entry = p.entry_price
 
+            # ✅ Защита от дублирования: проверяем Redis-ключ
+            _dedup_key = f"sl_sync_done:short:{sym}"
+            try:
+                if state.redis._client.exists(_dedup_key):
+                    print(f"[SL-SYNC] {sym} SHORT: уже синкован недавно — пропускаем")
+                    continue
+            except Exception:
+                pass
+
             if p.stop_loss and p.stop_loss > 0:
-                # SL есть на бирже — проверяем Redis
+                # SL есть на бирже — только синкуем Redis если пустой
                 _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
                 if _redis_sig and _f(_redis_sig.get("stop_loss", 0)) <= 0:
                     _redis_sig["stop_loss"] = p.stop_loss
                     state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
-                    print(f"[SL-SYNC] {sym}: Redis SL пустой, записан {p.stop_loss:.6f} с биржи")
+                    print(f"[SL-SYNC] {sym} SHORT: Redis SL пустой, записан {p.stop_loss:.6f} с биржи")
                 continue
 
             # SL отсутствует на бирже — рассчитываем аварийный
@@ -1538,27 +1549,28 @@ async def _startup_sl_sync():
                 continue
 
             sl_pct = Config.SL_BUFFER
-            if direction == "short":
-                sl = entry * (1 + sl_pct / 100)
-            else:
-                sl = entry * (1 - sl_pct / 100)
+            sl = entry * (1 + sl_pct / 100)  # SHORT: SL ВЫШЕ entry
 
-            pos_side = p.position_side  # "LONG" / "SHORT"
+            pos_side = "SHORT"
             ok = await state.auto_trader.bingx.update_stop_loss(sym, pos_side, sl, direction)
 
             if ok:
                 fixed += 1
-                print(f"[SL-SYNC] ✅ {sym} {direction.upper()}: аварийный SL={sl:.6f} выставлен")
+                print(f"[SL-SYNC] ✅ {sym} SHORT: аварийный SL={sl:.6f} выставлен")
                 # Обновляем Redis
                 _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
                 if _redis_sig:
                     _redis_sig["stop_loss"] = sl
                     state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
+                # Деdup-ключ: не дублировать в течение 10 мин
+                try:
+                    state.redis._client.setex(_dedup_key, 600, "1")
+                except Exception:
+                    pass
                 # Уведомляем в TG
-                d_emoji = "🟢" if direction == "long" else "🔴"
                 await state.telegram.send_message(
                     f"🚨 <b>SL SYNC</b> — аварийный стоп выставлен\n\n"
-                    f"{d_emoji} <code>#{sym}</code> {direction.upper()}\n"
+                    f"🔴 <code>#{sym}</code> SHORT\n"
                     f"📍 Вход: <b>{entry:.6f}</b>\n"
                     f"🛑 Новый SL: <b>{sl:.6f}</b> ({sl_pct}%)\n"
                     f"<i>⚠️ Позиция не имела SL — исправлено при старте</i>"

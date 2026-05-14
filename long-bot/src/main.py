@@ -1510,9 +1510,9 @@ async def _startup_sl_sync():
     """
     🚨 FIX: SL=0.000000 bug — синхронизация SL при старте.
 
-    Проверяем все BingX позиции. Для позиций без SL на бирже
-    рассчитываем аварийный SL и выставляем его.
-    Обновляем Redis для синхронизации с PositionTracker.
+    LONG бот обрабатывает ТОЛЬКО LONG позиции.
+    SHORT позиции — ответственность short-bot.
+    Защита от дублирования через Redis-ключ (TTL 10 мин).
     """
     await asyncio.sleep(10)
 
@@ -1520,7 +1520,7 @@ async def _startup_sl_sync():
         print("[SL-SYNC] AutoTrader не инициализирован — пропускаем")
         return
 
-    print("[SL-SYNC] 🔍 Проверка SL на всех BingX позициях...")
+    print("[SL-SYNC] 🔍 Проверка SL на LONG BingX позициях...")
     try:
         positions = await state.auto_trader.bingx.get_positions()
         if not positions:
@@ -1530,11 +1530,25 @@ async def _startup_sl_sync():
         fixed = 0
         skipped = 0
         for p in positions:
+            # ✅ FIX: LONG бот трогает ТОЛЬКО LONG позиции
+            if p.position_side != "LONG":
+                continue
+
             sym = p.symbol
-            direction = "long" if p.position_side == "LONG" else "short"
+            direction = "long"
             entry = p.entry_price
 
+            # ✅ Защита от дублирования: проверяем Redis-ключ
+            _dedup_key = f"sl_sync_done:long:{sym}"
+            try:
+                if state.redis._client.exists(_dedup_key):
+                    print(f"[SL-SYNC] {sym} LONG: уже синкован недавно — пропускаем")
+                    continue
+            except Exception:
+                pass
+
             if p.stop_loss and p.stop_loss > 0:
+                # SL есть на бирже — только синкуем Redis если пустой
                 _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
                 if _redis_sig:
                     try:
@@ -1544,7 +1558,7 @@ async def _startup_sl_sync():
                     if _rs_sl <= 0:
                         _redis_sig["stop_loss"] = p.stop_loss
                         state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
-                        print(f"[SL-SYNC] {sym}: Redis SL обновлён с биржи → {p.stop_loss:.6f}")
+                        print(f"[SL-SYNC] {sym} LONG: Redis SL обновлён с биржи → {p.stop_loss:.6f}")
                 continue
 
             if entry <= 0:
@@ -1552,22 +1566,26 @@ async def _startup_sl_sync():
                 continue
 
             sl_pct = Config.SL_BUFFER
-            sl = entry * (1 - sl_pct / 100)  # LONG: SL ниже entry
+            sl = entry * (1 - sl_pct / 100)  # LONG: SL НИЖЕ entry
 
-            pos_side = p.position_side
+            pos_side = "LONG"
             ok = await state.auto_trader.bingx.update_stop_loss(sym, pos_side, sl, direction)
 
             if ok:
                 fixed += 1
-                print(f"[SL-SYNC] ✅ {sym} {direction.upper()}: SL={sl:.6f} выставлен")
+                print(f"[SL-SYNC] ✅ {sym} LONG: SL={sl:.6f} выставлен")
                 _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
                 if _redis_sig:
                     _redis_sig["stop_loss"] = sl
                     state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
-                d_emoji = "🟢" if direction == "long" else "🔴"
+                # Деdup-ключ: не дублировать в течение 10 мин
+                try:
+                    state.redis._client.setex(_dedup_key, 600, "1")
+                except Exception:
+                    pass
                 await state.telegram.send_message(
                     f"🚨 <b>SL SYNC</b> — аварийный стоп выставлен\n\n"
-                    f"{d_emoji} <code>#{sym}</code> {direction.upper()}\n"
+                    f"🟢 <code>#{sym}</code> LONG\n"
                     f"📍 Вход: <b>{entry:.6f}</b>\n"
                     f"🛑 Новый SL: <b>{sl:.6f}</b> ({sl_pct}%)\n"
                     f"<i>⚠️ Позиция не имела SL — исправлено при старте</i>"
