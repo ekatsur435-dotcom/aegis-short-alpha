@@ -154,6 +154,13 @@ class Config:
     ATR_SL_MIN  = float(os.getenv("ATR_SL_MIN_PCT", "1.0"))
     ATR_SL_MAX  = float(os.getenv("ATR_SL_MAX_PCT", "4.0"))
 
+    # ✅ FIX: AEGIS_SHORT_MIN_SCORE — реальный порог Aegis engine (аналог LONG бота)
+    AEGIS_MIN_SCORE      = int(os.getenv("AEGIS_SHORT_MIN_SCORE", "55"))
+    # ✅ FIX: Adaptive threshold ceiling — max +N от MIN_SHORT_BASE_SCORE
+    ADAPTIVE_MAX_BOOST   = int(os.getenv("ADAPTIVE_MAX_BOOST", "3"))
+    # ✅ FIX: MOMENTUM SHORT порог (аналог LONG бота)
+    MOMENTUM_SCORE_THRESHOLD = int(os.getenv("MOMENTUM_SCORE_THRESHOLD", "58"))
+
     # ✅ Постоянный блэклист — символы которые всегда пропускаем
     # Формат ENV: SYMBOL_BLACKLIST=GIGAUSDT,LUNAUSDT,我踏马来了USDT
     SYMBOL_BLACKLIST: set = set(
@@ -344,7 +351,7 @@ async def lifespan(app: FastAPI):
         oi_analyzer=state.oi_analyzer,
         liq_mapper=state.liq_mapper,
         delta_analyzer=state.delta_analyzer,
-        min_score=Config.MIN_SCORE,
+        min_score=Config.AEGIS_MIN_SCORE,  # ✅ FIX: теперь читает AEGIS_SHORT_MIN_SCORE (было MIN_SHORT_SCORE=55)
     ) if Config.ENABLE_AEGIS_ENGINE else None
 
     # ── Smart DCA ──
@@ -796,14 +803,25 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 fg_modifier, fg_reason = -1, f"🧠 [F&G] {fg} Страх → SHORT -1"
 
         raw_score      = base_result.total_score
-        effective_score = max(min(raw_score + fg_modifier + _mtf_bonus, 100), 0)
+        # ✅ FIX P1: CASCADE учитывается ДО gate-проверки (аналог LONG бота)
+        _cas_pre = getattr(md, "cascade_signal", None)
+        _cas_pre_bonus = 0
+        if _cas_pre is not None and _cas_pre.has_signal and _cas_pre.direction == "short":
+            if _cas_pre.score_bonus >= 14:   _cas_pre_bonus = 10
+            elif _cas_pre.score_bonus >= 10: _cas_pre_bonus = 7
+            elif _cas_pre.score_bonus >= 8:  _cas_pre_bonus = 5
+            elif _cas_pre.score_bonus >= 6:  _cas_pre_bonus = 3
+        effective_score = max(min(raw_score + fg_modifier + _mtf_bonus + _cas_pre_bonus, 100), 0)
         min_score       = state.scorer.min_score
 
         if verbose:
             fg_str  = f" F&G={fg_modifier:+d}" if fg_modifier != 0 else ""
             mtf_str = f" MTF={_mtf_bonus:+d}"  if _mtf_bonus  != 0 else ""
-            print(f"{log_prefix} 📊 [BASE_SCORER] score={raw_score}{fg_str}{mtf_str} → {effective_score} (min={min_score})"
+            cas_str = f" CASCADE={_cas_pre_bonus:+d}" if _cas_pre_bonus > 0 else ""
+            print(f"{log_prefix} 📊 [BASE_SCORER] score={raw_score}{fg_str}{mtf_str}{cas_str} → {effective_score} (min={min_score})"
                   f" | components: {[(c.name, c.score) for c in base_result.components]}")
+            if _cas_pre_bonus > 0:
+                print(f"{log_prefix} 🎯 [CASCADE PRE-GATE] +{_cas_pre_bonus}pts → помогает пройти gate")
             if base_result.funding_info:
                 print(f"{log_prefix} 💰 {base_result.funding_info}")
 
@@ -862,9 +880,18 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             allow, reason = filter_mid_range(cons, price, "short", verbose=False, rsi_1h=rsi_1h_val)
             
             if cons.is_consolidating and not allow:
-                if verbose:
-                    print(f"{log_prefix} ❌ [CONSOLIDATION] {reason}")
-                return None
+                # ✅ FIX P4: score≥75 + upthrust/breakout_down → bypass (аналог LONG бота)
+                _cons_bypass = (
+                    base_score >= 75
+                    and (cons.has_upthrust or cons.has_breakout_down)
+                )
+                if _cons_bypass:
+                    if verbose:
+                        print(f"{log_prefix} 🟡 [CONSOLIDATION BYPASS] score={base_score:.0f}≥75 + upthrust/breakout → override {reason}")
+                else:
+                    if verbose:
+                        print(f"{log_prefix} ❌ [CONSOLIDATION] {reason}")
+                    return None
             
             if cons.has_upthrust and cons.is_consolidating:
                 base_score += 12  # Бонус за Upthrust
@@ -1223,33 +1250,26 @@ async def scan_market():
         elif _btc_cache_1h > 0.5:  btc_adj = -1
 
     # ── ADAPTIVE MIN_SCORE по Fear & Greed + BTC тренду ─────────────────────
-    # Динамически сдвигает порог Aegis Engine в диапазоне 62-78
-    # SHORT: жадность → лучше шортить (снижаем порог)
-    # LONG:  страх → лучше покупать (снижаем порог)
-    _base_aegis = Config.MIN_SCORE  # default из env (72)
+    # ✅ FIX: Adaptive base = MIN_SHORT_BASE_SCORE (было Config.MIN_SCORE=55 → игнорировало ENV)
+    # ✅ FIX: Убран мёртвый else-код (if "short"=="short" всегда True → else недостижим)
+    # ✅ FIX: Ceiling = base + ADAPTIVE_MAX_BOOST (было хардкод 78)
+    _base_aegis = int(os.getenv("MIN_SHORT_BASE_SCORE", "58"))  # читаем напрямую
     _adaptive_score = _base_aegis
     _fg = state.fear_greed_index
     if _fg is not None:
-        if "short" == "short":
-            if _fg > 75:   _adaptive_score -= 5  # жадность = хорошо для шорта
-            elif _fg > 65: _adaptive_score -= 2
-            elif _fg < 25: _adaptive_score += 5  # страх = плохо для шорта
-            elif _fg < 35: _adaptive_score += 2
-        else:  # long
-            if _fg < 20:   _adaptive_score -= 5  # экстремальный страх = покупаем
-            elif _fg < 35: _adaptive_score -= 2
-            elif _fg > 75: _adaptive_score += 5  # жадность = осторожно с лонгами
-            elif _fg > 65: _adaptive_score += 2
+        # SHORT: жадность → лучше шортить (снижаем порог), страх → плохо для шорта (повышаем)
+        if _fg > 75:   _adaptive_score -= 5
+        elif _fg > 65: _adaptive_score -= 2
+        elif _fg < 25: _adaptive_score += 5
+        elif _fg < 35: _adaptive_score += 2
     if _btc_cache_1h is not None:
-        if "short" == "short":
-            if _btc_cache_1h > 3.0:  _adaptive_score += 3  # BTC растёт = шортить сложнее
-            elif _btc_cache_1h < -2.0: _adaptive_score -= 3  # BTC падает = шорты проще
-        else:  # long
-            if _btc_cache_1h < -3.0:  _adaptive_score += 3  # BTC падает = лонги опаснее
-            elif _btc_cache_1h > 2.0:  _adaptive_score -= 2  # BTC растёт = лонги легче
-    _adaptive_score = max(62, min(78, _adaptive_score))
+        # SHORT: BTC растёт = шортить сложнее (повышаем порог), BTC падает = шорты проще
+        if _btc_cache_1h > 3.0:  _adaptive_score += 3
+        elif _btc_cache_1h < -2.0: _adaptive_score -= 3
+    # Clamp: не выше base+ADAPTIVE_MAX_BOOST, не ниже base-5
+    _adaptive_score = max(_base_aegis - 5, min(_base_aegis + Config.ADAPTIVE_MAX_BOOST, _adaptive_score))
     if _adaptive_score != _base_aegis:
-        print(f"🎯 [ADAPTIVE] Aegis min_score: {_base_aegis} → {_adaptive_score} "
+        print(f"🎯 [ADAPTIVE] SHORT min: {_base_aegis} → {_adaptive_score} "
               f"(F&G={_fg}, BTC_1h={(_btc_cache_1h or 0):.1f}%)")
     state._adaptive_min_score = _adaptive_score
 
