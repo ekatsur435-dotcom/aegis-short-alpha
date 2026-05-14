@@ -1381,7 +1381,11 @@ async def scan_market():
             if signal.get("aegis_components"):
                 demo_flag = " [DEMO]" if Config.BINGX_DEMO else " [REAL]"
                 if exchange_full and not trade_result:
-                    final_status = f"📊 TG-уведомление (биржа заполнена {active_count}/{Config.MAX_POSITIONS})"
+                    final_status = f"📊 Виртуальная (биржа заполнена {active_count}/{Config.MAX_POSITIONS})"
+                    if state.redis:
+                        saved = state.redis.save_virtual_position(Config.BOT_TYPE, symbol, signal)
+                        if saved:
+                            print(f"✅ Virtual position saved (exchange full): {symbol}")
                 elif trade_result:
                     exchange_label = "BingX DEMO" if Config.BINGX_DEMO else "BingX REAL"
                     final_status = f"✅ Открыта на {exchange_label}"

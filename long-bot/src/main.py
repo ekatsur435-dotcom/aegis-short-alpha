@@ -109,9 +109,17 @@ class Config:
     SL_BUFFER     = float(os.getenv("LONG_SL_BUFFER", "2.5"))  # ✅ FIX v17: 3.0→2.5% (TP1 теперь выше)
     LEVERAGE      = os.getenv("LONG_LEVERAGE", "5-20")
 
-    # LONG TP: меньше фиксируем рано (ждём движения)
-    TP_LEVELS  = [3.0, 5.0, 8.0, 12.0, 18.0, 25.0]
-    TP_WEIGHTS = [15,  20,  20,  15,   15,   15]
+    # LONG TP: 4 уровня дефолт. TP5–TP6 только при EXTENDED_TP_LONG=true + трендовый паттерн
+    # ENV: EXTENDED_TP_LONG=true → разрешить 6 TP для BREAKOUT/WYCKOFF/SWEEP
+    TP_LEVELS  = [3.0, 5.0, 8.0, 12.0, 18.0, 25.0]  # TP5=18%, TP6=25% — только extended
+    TP_WEIGHTS_4 = [25, 30, 25, 20]                   # дефолт 4 TP, сумма=100%
+    TP_WEIGHTS_6 = [15, 20, 20, 15, 15, 15]           # extended 6 TP, сумма=100%
+    # Паттерны, при которых оправдан Extended TP (трендовые, не контртрендовые)
+    EXTENDED_TP_PATTERNS = {
+        "BREAKOUT_LONG", "WYCKOFF_SPRING", "LIQUIDITY_SWEEP_LONG",
+        "MOMENTUM_LONG", "BREAKOUT_LONG_4H", "WYCKOFF_SPRING_4H",
+        "LIQUIDITY_SWEEP_LONG_4H", "MOMENTUM_LONG_4H",
+    }
 
     # Risk management
     RISK_PER_TRADE   = float(os.getenv("RISK_PER_TRADE", "0.0004"))
@@ -948,18 +956,29 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             sl_pct    = Config.SL_BUFFER
 
         # ── Dynamic TP (выше входа для Long) ─────────────────────────
+        # Extended TP: 6 уровней для трендовых паттернов при EXTENDED_TP_LONG=true
+        import os as _os
+        _env_ext_long   = _os.getenv("EXTENDED_TP_LONG", "false").lower() == "true"
+        _pat_name_base  = (patterns[0].name if patterns else "").replace("_30M","").replace("_1D","")
+        _pat_is_trend   = _pat_name_base in Config.EXTENDED_TP_PATTERNS
+        _use_ext_tp     = _env_ext_long and _pat_is_trend
+        _tp_count       = 6 if _use_ext_tp else 4
+        _tp_weights     = Config.TP_WEIGHTS_6 if _use_ext_tp else Config.TP_WEIGHTS_4
+        if _use_ext_tp and verbose:
+            print(f"{log_prefix} 🎯 [EXTENDED TP] 6 уровней для {_pat_name_base}")
+
         take_profits = []
         if state.dca_engine:
             atr_val = state.dca_engine.calculate_atr(ohlcv_15m)
             tps     = state.dca_engine.calculate_tp_levels(
                 entry_price=entry_price, sl_price=stop_loss,
-                num_tps=4, funding_rate=md.funding_rate, atr=atr_val,
+                num_tps=_tp_count, funding_rate=md.funding_rate, atr=atr_val,
             )
             take_profits = tps
         else:
-            for i, tp_pct in enumerate(Config.TP_LEVELS[:4]):
+            for i, tp_pct in enumerate(Config.TP_LEVELS[:_tp_count]):
                 tp_price = price * (1 + tp_pct / 100)
-                take_profits.append((round(tp_price, 8), Config.TP_WEIGHTS[i]))
+                take_profits.append((round(tp_price, 8), _tp_weights[i]))
 
         # ── AEGIS LONG ENGINE ─────────────────────────────────────────
         aegis_signal = None
@@ -1337,7 +1356,11 @@ async def scan_market():
             if signal.get("aegis_components"):
                 demo_flag = " [DEMO]" if Config.BINGX_DEMO else " [REAL]"
                 if exchange_full and not trade_result:
-                    final_status = f"📊 TG-уведомление (биржа заполнена {active_count}/{Config.MAX_POSITIONS})"
+                    final_status = f"📊 Виртуальная (биржа заполнена {active_count}/{Config.MAX_POSITIONS})"
+                    if state.redis:
+                        saved = state.redis.save_virtual_position(Config.BOT_TYPE, symbol, signal)
+                        if saved:
+                            print(f"✅ Virtual position saved (exchange full): {symbol}")
                 elif trade_result:
                     exchange_label = "BingX DEMO" if Config.BINGX_DEMO else "BingX REAL"
                     final_status = f"✅ Открыта на {exchange_label}"

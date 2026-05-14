@@ -246,9 +246,22 @@ SHORT_TP_LEVELS_STANDARD      = [3.0, 5.0, 7.5, 10.0, 13.0, 18.0]  # станд�
 SHORT_TP_LEVELS_AGGRESSIVE    = [4.0, 6.5, 9.5, 13.0, 17.0, 23.0]  # агрессивно (RR~2.0)
 
 # Веса: для SHORT берём БОЛЬШЕ на первых TP (быстрая фиксация)
-SHORT_TP_WEIGHTS_CONSERVATIVE = [15, 20, 20, 15, 15, 15]  # равномерно
-SHORT_TP_WEIGHTS_STANDARD     = [15, 20, 20, 15, 15, 15]  # текущие
-SHORT_TP_WEIGHTS_FAST_EXIT    = [15, 20, 20, 15, 15, 15]   # равномерно
+# 4 TP (дефолт): суммарно 100% — [25, 30, 25, 20]
+# 6 TP (extended): суммарно 100% — [15, 20, 20, 15, 15, 15]
+SHORT_TP_WEIGHTS_CONSERVATIVE = [25, 30, 25, 20, 0, 0]    # 4 TP быстро
+SHORT_TP_WEIGHTS_STANDARD     = [25, 30, 25, 20, 0, 0]    # 4 TP стандарт
+SHORT_TP_WEIGHTS_FAST_EXIT    = [35, 30, 20, 15, 0, 0]    # 4 TP быстрый выход
+SHORT_TP_WEIGHTS_EXTENDED     = [15, 20, 20, 15, 15, 15]  # 6 TP только для трендовых
+
+# Паттерны, при которых оправдан Extended TP (6 уровней вместо 4)
+# Это трендовые паттерны с потенциалом продолжения, а не контртрендовые
+SHORT_EXTENDED_TP_PATTERNS = {
+    "BREAKOUT_SHORT", "WYCKOFF_UPTHRUST", "LIQUIDITY_SWEEP_SHORT",
+    "PUMP_DUMP_SHORT", "MOMENTUM_SHORT", "DISTRIBUTION",
+    # HTF версии тоже
+    "BREAKOUT_SHORT_4H", "WYCKOFF_UPTHRUST_4H", "LIQUIDITY_SWEEP_SHORT_4H",
+    "PUMP_DUMP_SHORT_4H", "MOMENTUM_SHORT_4H", "DISTRIBUTION_4H",
+}
 
 # Рекомендации по TP стилю:
 #   HIGH_FUNDING (>0.1%)     → CONSERVATIVE (фандинг убивает прибыль)
@@ -263,43 +276,74 @@ def get_short_tp_config(
     pattern_name: Optional[str],
     btc_trend: Optional[str],   # "up" | "down" | "sideways"
     atr_pct: float = 0.0,       # ✅ v19: ATR как % цены для адаптивного RR
+    extended_tp: bool = False,  # 🆕 ENV EXTENDED_TP_SHORT=true → 6 уровней для трендовых
 ) -> tuple:
     """
     Выбрать оптимальный TP профиль для SHORT в зависимости от контекста.
 
+    Дефолт: 4 TP (быстрая фиксация — шорт контртрендовый).
+    Extended: 6 TP только для трендовых паттернов (BREAKOUT, WYCKOFF, SWEEP).
+
+    ENV: EXTENDED_TP_SHORT=true  → разрешить 6 TP для трендовых паттернов
+         EXTENDED_TP_SHORT=false → всегда 4 TP (дефолт, безопаснее)
+
     Returns:
         (tp_levels, tp_weights)
     """
+    import os
+    _env_extended = os.getenv("EXTENDED_TP_SHORT", "false").lower() == "true"
+    _pattern_extended = (pattern_name or "").replace("_30M", "").replace("_1D", "") \
+                        in SHORT_EXTENDED_TP_PATTERNS
+    _use_extended = extended_tp or (_env_extended and _pattern_extended)
+
+    def _slice(levels, weights):
+        """4 TP дефолт, 6 TP если extended."""
+        n = 6 if _use_extended else 4
+        lvls = levels[:n]
+        # Нормализуем веса до 100%
+        raw = weights[:n]
+        total = sum(raw)
+        if total > 0 and total != 100:
+            raw = [round(w / total * 100) for w in raw]
+            # Поправляем округление
+            diff = 100 - sum(raw)
+            raw[-1] += diff
+        return lvls, raw
+
     # ✅ v19: Адаптивный RR под волатильность
-    # При высоком ATR (>3%) TP уровни шире — иначе spike закрывает их преждевременно
     if atr_pct >= 3.0:
-        # Масштабируем все уровни на ATR множитель
-        _mult = min(atr_pct / 2.0, 2.5)  # макс 2.5x
-        def _scale(levels):
-            return [round(l * _mult, 2) for l in levels]
-        base_lvls = _scale(SHORT_TP_LEVELS_STANDARD)
-        return base_lvls, SHORT_TP_WEIGHTS_STANDARD
+        _mult = min(atr_pct / 2.0, 2.5)
+        base_lvls = [round(l * _mult, 2) for l in SHORT_TP_LEVELS_STANDARD]
+        w = SHORT_TP_WEIGHTS_EXTENDED if _use_extended else SHORT_TP_WEIGHTS_STANDARD
+        return _slice(base_lvls, w)
     elif atr_pct >= 2.0:
         _mult = 1.3
         base_lvls = [round(l * _mult, 2) for l in SHORT_TP_LEVELS_STANDARD]
-        return base_lvls, SHORT_TP_WEIGHTS_CONSERVATIVE
+        w = SHORT_TP_WEIGHTS_EXTENDED if _use_extended else SHORT_TP_WEIGHTS_CONSERVATIVE
+        return _slice(base_lvls, w)
 
-    # Высокий фандинг = торопимся выйти
+    # Высокий фандинг = торопимся выйти (всегда 4 TP независимо от extended)
     if funding_rate >= 0.10:
-        return SHORT_TP_LEVELS_CONSERVATIVE, SHORT_TP_WEIGHTS_FAST_EXIT
+        return _slice(SHORT_TP_LEVELS_CONSERVATIVE, SHORT_TP_WEIGHTS_FAST_EXIT)
+
+    # Трендовые паттерны — агрессивнее
+    if _use_extended and _pattern_extended:
+        if btc_trend == "down":
+            return _slice(SHORT_TP_LEVELS_AGGRESSIVE, SHORT_TP_WEIGHTS_EXTENDED)
+        return _slice(SHORT_TP_LEVELS_STANDARD, SHORT_TP_WEIGHTS_EXTENDED)
 
     # Momentum шорт = берём большое движение
-    if pattern_name in ("MEGA_SHORT", "DISTRIBUTION"):
+    if pattern_name in ("MEGA_SHORT", "DISTRIBUTION", "MEGA_SHORT_4H", "DISTRIBUTION_4H"):
         if btc_trend == "down":
-            return SHORT_TP_LEVELS_AGGRESSIVE, SHORT_TP_WEIGHTS_STANDARD
-        return SHORT_TP_LEVELS_STANDARD, SHORT_TP_WEIGHTS_STANDARD
+            return _slice(SHORT_TP_LEVELS_AGGRESSIVE, SHORT_TP_WEIGHTS_STANDARD)
+        return _slice(SHORT_TP_LEVELS_STANDARD, SHORT_TP_WEIGHTS_STANDARD)
 
     # BTC падает — можно держать дольше
     if btc_trend == "down":
-        return SHORT_TP_LEVELS_STANDARD, SHORT_TP_WEIGHTS_CONSERVATIVE
+        return _slice(SHORT_TP_LEVELS_STANDARD, SHORT_TP_WEIGHTS_CONSERVATIVE)
 
-    # По умолчанию — осторожно
-    return SHORT_TP_LEVELS_CONSERVATIVE, SHORT_TP_WEIGHTS_FAST_EXIT
+    # По умолчанию — осторожно, 4 TP
+    return _slice(SHORT_TP_LEVELS_CONSERVATIVE, SHORT_TP_WEIGHTS_FAST_EXIT)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
