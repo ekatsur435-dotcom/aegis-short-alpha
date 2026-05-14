@@ -1,0 +1,181 @@
+# Aegis Dual Bot System - Render Blueprint
+# Два бота (SHORT + LONG) в одном репозитории
+
+services:
+  # ═══════════════════════════════════════════════════════════════════════
+  # 🔴 AEGIS SHORT ALPHA - Short Trading Bot
+  # ═══════════════════════════════════════════════════════════════════════
+  - type: web
+    name: aegis-short-alpha
+    runtime: python
+    plan: starter
+    region: oregon
+    rootDir: short-bot
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHONPATH
+        value: ../shared:./src
+      - key: BOT_TYPE
+        value: "short"
+      - key: REDIS_URL
+        sync: false  # Задать вручную в dashboard
+      - key: BINGX_API_KEY
+        sync: false
+      - key: BINGX_API_SECRET
+        sync: false
+      # ✅ П5: BINGX_DEMO_MODE убран из render.yaml — управляй через ENV в Dashboard
+      # Установи BINGX_DEMO_MODE=false в Render Dashboard → Environment для реальной торговли
+      # Установи BINGX_DEMO_MODE=true для демо-режима
+      - key: BINGX_DEMO_MODE
+        sync: false  # ← Управляй через Render Dashboard Environment Variables!
+      - key: SHORT_TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: SHORT_TELEGRAM_CHAT_ID
+        sync: false
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          name: aegis-short-alpha
+          type: web
+          property: url
+      # Config
+      - key: MAX_PAIRS
+        value: "500"
+      - key: MAX_WATCHLIST
+        value: "500"
+      - key: MIN_SHORT_SCORE
+        value: "65"          # AEGIS final threshold
+      - key: MIN_SHORT_BASE_SCORE
+        value: "50"          # BASE_SCORER порог (мягче — AEGIS потом доуточняет)
+      - key: SCAN_INTERVAL
+        value: "120"          # П8: было 180 → 120s
+      - key: MAX_POSITIONS
+        value: "15"
+      - key: SHORT_SL_BUFFER
+        value: "2.5"
+      - key: SHORT_LEVERAGE
+        value: "5-30"
+      - key: MIN_VOLUME_USDT
+        value: "150000"       # П15: было 300000 → 150000
+      - key: RISK_PER_TRADE
+        value: "0.001"
+      - key: MAX_POSITION_PCT
+        value: "0.15"
+      - key: DAILY_DRAWDOWN_LIMIT
+        value: "5.0"
+      - key: KELLY_FRACTION
+        value: "0.25"
+      - key: DCA_LEVELS
+        value: "4"
+      - key: DCA_ATR_MULT
+        value: "1.5"
+      - key: DCA_SIZE_MULT
+        value: "1.5"
+      - key: ENABLE_AEGIS_ENGINE
+        value: "true"
+      - key: ENABLE_PUMP_DETECTOR
+        value: "true"
+      - key: ENABLE_OI_ANALYZER
+        value: "true"
+      - key: ENABLE_LIQ_MAPPER
+        value: "true"
+      - key: ENABLE_DELTA
+        value: "true"
+      - key: ENABLE_SMART_DCA
+        value: "true"
+      - key: USE_SMC
+        value: "true"
+      - key: AUTO_TRADING_ENABLED
+        value: "false"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # 🟢 AEGIS LONG ALPHA - Long Trading Bot
+  # ═══════════════════════════════════════════════════════════════════════
+  - type: web
+    name: aegis-long-alpha
+    runtime: python
+    plan: starter
+    region: oregon
+    rootDir: long-bot
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHONPATH
+        value: ../shared:./src
+      - key: BOT_TYPE
+        value: "long"
+      - key: REDIS_URL
+        sync: false
+      - key: BINGX_API_KEY
+        sync: false
+      - key: BINGX_API_SECRET
+        sync: false
+      # ✅ П5: BINGX_DEMO_MODE управляется через ENV Dashboard (не хардкод)
+      - key: BINGX_DEMO_MODE
+        sync: false  # ← Установи true/false в Render Dashboard Environment Variables
+      - key: LONG_TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: LONG_TELEGRAM_CHAT_ID
+        sync: false
+      - key: RENDER_EXTERNAL_URL
+        fromService:
+          name: aegis-long-alpha
+          type: web
+          property: url
+      # Config (LONG-specific)
+      - key: MAX_PAIRS
+        value: "500"
+      - key: MAX_WATCHLIST
+        value: "500"
+      - key: MIN_LONG_SCORE
+        value: "70"           # AEGIS final threshold
+      - key: MIN_LONG_BASE_SCORE
+        value: "45"           # BASE_SCORER порог (мягче — ищет перепроданность)
+      - key: SCAN_INTERVAL
+        value: "180"          # Long чуть медленнее short
+      - key: MAX_POSITIONS
+        value: "15"
+      - key: LONG_SL_BUFFER
+        value: "3.0"
+      - key: LONG_LEVERAGE
+        value: "5-20"
+      - key: MIN_VOLUME_USDT
+        value: "200000"       # П15: long — чуть выше порог для качества
+      - key: RISK_PER_TRADE
+        value: "0.001"
+      - key: MAX_POSITION_PCT
+        value: "0.15"
+      - key: DAILY_DRAWDOWN_LIMIT
+        value: "5.0"
+      - key: KELLY_FRACTION
+        value: "0.25"
+      - key: DCA_LEVELS
+        value: "4"
+      - key: DCA_ATR_MULT
+        value: "1.5"
+      - key: DCA_SIZE_MULT
+        value: "1.5"
+      - key: ENABLE_AEGIS_ENGINE
+        value: "true"
+      - key: ENABLE_DUMP_DETECTOR
+        value: "true"
+      - key: ENABLE_WYCKOFF
+        value: "true"
+      - key: ENABLE_BSL_SCANNER
+        value: "true"
+      - key: ENABLE_OI_ANALYZER
+        value: "true"
+      - key: ENABLE_LIQ_MAPPER
+        value: "true"
+      - key: ENABLE_DELTA
+        value: "true"
+      - key: ENABLE_SMART_DCA
+        value: "true"
+      - key: USE_SMC
+        value: "true"
+      - key: ENABLE_BTC_FILTER
+        value: "true"
+      - key: BTC_BLOCK_THRESHOLD
+        value: "-3.0"
+      - key: AUTO_TRADING_ENABLED
+        value: "false"
