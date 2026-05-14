@@ -197,7 +197,8 @@ class BaseScorer:
             elif top_trader_ratio <= 0.8: score, desc = 7,  f"Топ-трейдеры {top_trader_ratio:.2f} — шорт перевес"
             elif top_trader_ratio <= 1.0: score, desc = 4,  f"Топ-трейдеры {top_trader_ratio:.2f} — нейтраль"
             elif top_trader_ratio <= 1.3: score, desc = 2,  f"Топ-трейдеры {top_trader_ratio:.2f} — лёгкий лонг"
-            else:                          score, desc = 0,  f"Топ-трейдеры {top_trader_ratio:.2f} — в лонге (осторожно)"
+            elif top_trader_ratio <= 2.0: score, desc = 4,  f"🔥 Топ-трейдеры {top_trader_ratio:.2f} — перегружены лонгами (контр-сигнал SHORT)"
+            else:                          score, desc = 6,  f"🚨 Топ-трейдеры {top_trader_ratio:.2f} — экстремальный лонг-перегрев (сильный SHORT сигнал)"
         else:
             # Для LONG: топ-трейдеры в лонге = хороший знак
             if top_trader_ratio >= 1.7:   score, desc = 10, f"🐋 Топ-трейдеры {top_trader_ratio:.2f} — активно лонгуют"
