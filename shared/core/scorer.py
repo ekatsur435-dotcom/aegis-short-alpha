@@ -1,5 +1,9 @@
 """
-Dual Scoring System: ShortScorer + LongScorer  v2.1
+Dual Scoring System: ShortScorer + LongScorer  v2.2
+
+ИЗМЕНЕНИЯ v2.2:
+  ✅ P4: _funding_extreme_bonus — экстремальные пороги фандинга (+10)
+  ✅ P1: orderbook_score param в calculate_score() для обоих скоров
 
 ИЗМЕНЕНИЯ v2.1:
   ✅ Новые паттерны добавлены в calculate_pattern_component:
@@ -12,6 +16,7 @@ Dual Scoring System: ShortScorer + LongScorer  v2.1
   ✅ atr_14_pct в скоре: штраф за чрезмерную волатильность
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from enum import Enum
@@ -170,6 +175,26 @@ class BaseScorer:
             return -5, f"Экстремальная волатильность ATR={atr_pct:.1f}% -5"
         if atr_pct > 2.0:
             return -3, f"Высокая волатильность ATR={atr_pct:.1f}% -3"
+        return 0, ""
+
+    def _funding_extreme_bonus(self, funding: float, direction: str) -> Tuple[int, str]:
+        """
+        P4: Бонус за экстремальный фандинг.
+        SHORT: очень высокий фандинг → лонги перегреты → +10
+        LONG:  очень отрицательный фандинг → шорты перегреты → +10
+        Пороги читаются из ENV с безопасными дефолтами.
+        """
+        try:
+            extreme_short = float(os.getenv("FUNDING_EXTREME_SHORT", "0.05"))
+            extreme_long  = float(os.getenv("FUNDING_EXTREME_LONG",  "-0.05"))
+            if direction == "short":
+                if funding >= extreme_short:
+                    return 10, f"🔥 Экстремальный фандинг {funding:.4f}% — long liquidation"
+            else:
+                if funding <= extreme_long:
+                    return 10, f"🔥 Экстремальный -фандинг {funding:.4f}% — short squeeze"
+        except Exception:
+            pass
         return 0, ""
 
     def calculate_top_trader_component(
@@ -454,7 +479,8 @@ class ShortScorer(BaseScorer):
                         oi_15m: float = 0.0, oi_30m: float = 0.0,
                         oi_1h: float = 0.0, oi_4h: float = 0.0,
                         htf_structure: str = "", zone: str = "",
-                        delta_30m: Optional[List[float]] = None) -> ScoreResult:
+                        delta_30m: Optional[List[float]] = None,
+                        orderbook_score: int = 0) -> ScoreResult:  # P1: order book score
         if hourly_deltas is None:
             hourly_deltas = []
         if patterns is None:
@@ -481,6 +507,14 @@ class ShortScorer(BaseScorer):
         total += atr_pen
         tk_bonus, tk_reason = self._taker_bonus(taker_ratio, "short")
         total += tk_bonus
+        # P4: Funding extreme bonus
+        fe_bonus, fe_reason = self._funding_extreme_bonus(funding_current, "short")
+        total += fe_bonus
+        # P1: Order book score
+        try:
+            total += int(orderbook_score)
+        except Exception:
+            pass
         total = min(max(total, 0), 100)
         reasons = []
         if components[0].score >= 8:  reasons.append(f"RSI перекуплен ({rsi_1h:.1f})")
@@ -493,6 +527,8 @@ class ShortScorer(BaseScorer):
         if vs_reason: reasons.append(vs_reason)
         if atr_reason: reasons.append(atr_reason)
         if tk_reason: reasons.append(tk_reason)
+        if fe_reason: reasons.append(fe_reason)
+        if orderbook_score >= 6: reasons.append(f"Стакан подтверждает short")
         # Funding — только для уведомления, не в скоре
         f_info = self._funding_info_str(funding_current, funding_accumulated)
         return ScoreResult(
@@ -672,7 +708,8 @@ class LongScorer(BaseScorer):
                         oi_1h: float = 0.0, oi_4h: float = 0.0,
                         htf_structure: str = "", zone: str = "",
                         momentum_mode: bool = False,
-                        delta_30m: Optional[List[float]] = None) -> ScoreResult:
+                        delta_30m: Optional[List[float]] = None,
+                        orderbook_score: int = 0) -> ScoreResult:  # P1: order book score
         if hourly_deltas is None:
             hourly_deltas = []
         if patterns is None:
@@ -709,6 +746,14 @@ class LongScorer(BaseScorer):
         total += atr_pen
         tk_bonus, tk_reason = self._taker_bonus(taker_ratio, "long")
         total += tk_bonus
+        # P4: Funding extreme bonus
+        fe_bonus, fe_reason = self._funding_extreme_bonus(funding_current, "long")
+        total += fe_bonus
+        # P1: Order book score
+        try:
+            total += int(orderbook_score)
+        except Exception:
+            pass
         total = min(max(total, 0), 100)
         reasons = []
         if components[0].score >= 15: reasons.append(f"RSI перепродан ({rsi_1h:.1f})")
@@ -721,6 +766,8 @@ class LongScorer(BaseScorer):
         if vs_reason: reasons.append(vs_reason)
         if atr_reason: reasons.append(atr_reason)
         if tk_reason: reasons.append(tk_reason)
+        if fe_reason: reasons.append(fe_reason)
+        if orderbook_score >= 6: reasons.append(f"Стакан подтверждает long")
         # Funding — только для уведомления, не в скоре
         f_info = self._funding_info_str(funding_current, funding_accumulated)
         return ScoreResult(

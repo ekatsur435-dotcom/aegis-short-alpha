@@ -172,6 +172,13 @@ class Config:
     SIGNAL_TTL_HOURS = 24
     TRAIL_ACTIVATION = float(os.getenv("SHORT_TRAIL_ACTIVATION", "0.010"))
 
+    # P4: Funding extreme thresholds (informational — scorer reads ENV directly)
+    FUNDING_EXTREME_LONG  = float(os.getenv("FUNDING_EXTREME_LONG",  "-0.05"))
+    FUNDING_EXTREME_SHORT = float(os.getenv("FUNDING_EXTREME_SHORT",  "0.05"))
+
+    # P1: Order book
+    ENABLE_ORDERBOOK = os.getenv("ENABLE_ORDERBOOK_SCORER", "true").lower() == "true"
+
 
 # ============================================================================
 # GLOBAL STATE
@@ -706,6 +713,56 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 _dedup.append(_p)
         patterns = _dedup[:8]  # топ-8 паттернов
 
+        # ── P2: Flag / Pennant Detector ───────────────────────────────────────
+        _fp_result = None
+        try:
+            if ohlcv_4h and len(ohlcv_4h) >= 12:
+                from core.flag_pennant_detector import detect_flag_pennant
+                from core.pattern_detector import PatternResult as _PR2
+                _fp_result = detect_flag_pennant(ohlcv_4h, md.price, "short")
+                if _fp_result and _fp_result.has_signal:
+                    _fp_bonus = min(_fp_result.score_bonus, 20)
+                    patterns.append(_PR2(
+                        name=_fp_result.pattern_type,
+                        score_bonus=_fp_bonus,
+                        direction="short",
+                        confidence=0.78 if _fp_result.is_breakout else 0.60,
+                        reasons=[_fp_result.description],
+                    ))
+                    if verbose:
+                        print(f"{log_prefix} 🚩 [FLAG/PENNANT] {_fp_result.description}")
+        except Exception as _fp_err:
+            pass  # не критично
+
+        # ── P1: Order Book Score ──────────────────────────────────────────────
+        _ob_score = 0
+        try:
+            if Config.ENABLE_ORDERBOOK and state.auto_trader and hasattr(state.auto_trader, 'bingx') and state.auto_trader.bingx:
+                _ob_data = await state.auto_trader.bingx.get_order_book(symbol)
+                if _ob_data:
+                    from core.orderbook_scorer import calculate_orderbook_score
+                    _ob_score, _ob_desc, _ = calculate_orderbook_score(_ob_data, md.price, "short")
+                    if verbose and _ob_desc:
+                        print(f"{log_prefix} {_ob_desc}")
+        except Exception as _ob_err:
+            pass  # не критично
+
+        # ── P3: OnChain CoinGecko Volume Z-Score ─────────────────────────────
+        _onchain_bonus = 0
+        _onchain_desc = ""
+        try:
+            if os.getenv("ENABLE_ONCHAIN", "true").lower() == "true":
+                from core.onchain_client import get_volume_z_score, onchain_score_bonus
+                _redis_cli = state.redis.client if state.redis else None
+                _z, _zdesc = await asyncio.wait_for(
+                    get_volume_z_score(symbol, _redis_cli), timeout=8.0
+                )
+                _onchain_bonus, _onchain_desc = onchain_score_bonus(_z, "short")
+                if verbose and _zdesc:
+                    print(f"{log_prefix} {_zdesc}")
+        except Exception:
+            pass  # не критично
+
         # MS-данные доступны вне блока verbose для сохранения в signal
         _ms_log = getattr(md, "market_structure", None)
 
@@ -786,6 +843,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             htf_structure=_htf_str,
             zone=_zone,
             delta_30m=_delta_30m,
+            orderbook_score=_ob_score,
         )
 
         # Fear & Greed макро-модификатор — применяем ДО проверки is_valid
@@ -811,17 +869,20 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             elif _cas_pre.score_bonus >= 10: _cas_pre_bonus = 7
             elif _cas_pre.score_bonus >= 8:  _cas_pre_bonus = 5
             elif _cas_pre.score_bonus >= 6:  _cas_pre_bonus = 3
-        effective_score = max(min(raw_score + fg_modifier + _mtf_bonus + _cas_pre_bonus, 100), 0)
+        effective_score = max(min(raw_score + fg_modifier + _mtf_bonus + _cas_pre_bonus + _onchain_bonus, 100), 0)
         min_score       = state.scorer.min_score
 
         if verbose:
             fg_str  = f" F&G={fg_modifier:+d}" if fg_modifier != 0 else ""
             mtf_str = f" MTF={_mtf_bonus:+d}"  if _mtf_bonus  != 0 else ""
             cas_str = f" CASCADE={_cas_pre_bonus:+d}" if _cas_pre_bonus > 0 else ""
-            print(f"{log_prefix} 📊 [BASE_SCORER] score={raw_score}{fg_str}{mtf_str}{cas_str} → {effective_score} (min={min_score})"
+            oc_str  = f" ONCHAIN={_onchain_bonus:+d}" if _onchain_bonus != 0 else ""
+            print(f"{log_prefix} 📊 [BASE_SCORER] score={raw_score}{fg_str}{mtf_str}{cas_str}{oc_str} → {effective_score} (min={min_score})"
                   f" | components: {[(c.name, c.score) for c in base_result.components]}")
             if _cas_pre_bonus > 0:
                 print(f"{log_prefix} 🎯 [CASCADE PRE-GATE] +{_cas_pre_bonus}pts → помогает пройти gate")
+            if _onchain_desc:
+                print(f"{log_prefix} 📊 [ONCHAIN] {_onchain_desc}")
             if base_result.funding_info:
                 print(f"{log_prefix} 💰 {base_result.funding_info}")
 

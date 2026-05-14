@@ -449,6 +449,34 @@ class BingXClient:
     # UPDATE STOP LOSS — отменить старый SL + выставить новый
     # =========================================================================
 
+    # =========================================================================
+    # ORDER BOOK — P1
+    # =========================================================================
+
+    async def get_order_book(self, symbol: str, depth: int = 20) -> Optional[Dict]:
+        """
+        Fetches order book for perpetual futures from BingX.
+        Returns: {"bids": [[price, qty], ...], "asks": [[price, qty], ...]} or None
+        """
+        try:
+            endpoint = "/openApi/swap/v2/quote/depth"
+            # BingX uses USDT pairs like BTC-USDT for swap
+            bingx_sym = symbol.replace("USDT", "-USDT") if "-" not in symbol else symbol
+            data = await self._make_request("GET", endpoint,
+                                             params={"symbol": bingx_sym, "limit": depth},
+                                             signed=False)
+            if data and data.get("code") == 0:
+                return data.get("data", {})
+            return None
+        except Exception as e:
+            import logging as _lg
+            _lg.getLogger(__name__).debug(f"[OrderBook] {symbol}: {e}")
+            return None
+
+    # =========================================================================
+    # UPDATE STOP LOSS — отменить старый SL + выставить новый
+    # =========================================================================
+
     async def update_stop_loss(self, symbol: str, position_side: str,
                                 new_sl: float, direction: str) -> bool:
         """
