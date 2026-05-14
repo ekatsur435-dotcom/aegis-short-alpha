@@ -144,8 +144,15 @@ class Config:
     BINGX_DEMO      = os.getenv("BINGX_DEMO_MODE", "true").strip().lower() not in ("false", "0", "no", "real")
 
     # Watchlist
-    MIN_VOLUME_USDT = int(os.getenv("MIN_VOLUME_USDT", "300000"))
-    MAX_WATCHLIST   = int(os.getenv("MAX_WATCHLIST", "150"))
+    MIN_VOLUME_USDT     = int(os.getenv("MIN_VOLUME_USDT", "200000"))    # ✅ v2.1: 300K→200K
+    MAX_WATCHLIST       = int(os.getenv("MAX_WATCHLIST", "200"))          # ✅ v2.1: 150→200
+    WATCHLIST_REFRESH_H = float(os.getenv("WATCHLIST_REFRESH_H", "2.0")) # ✅ v2.1: обновление каждые 2ч
+
+    # ATR-dynamic SL (M1)
+    USE_ATR_SL  = os.getenv("USE_ATR_SL", "true").lower() == "true"
+    ATR_SL_MULT = float(os.getenv("ATR_SL_MULT", "1.5"))
+    ATR_SL_MIN  = float(os.getenv("ATR_SL_MIN_PCT", "1.0"))
+    ATR_SL_MAX  = float(os.getenv("ATR_SL_MAX_PCT", "4.0"))
 
     # ✅ Постоянный блэклист — символы которые всегда пропускаем
     # Формат ENV: SYMBOL_BLACKLIST=GIGAUSDT,LUNAUSDT,我踏马来了USDT
@@ -461,7 +468,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(background_scanner())
     asyncio.create_task(state.tracker.run())
     asyncio.create_task(_daily_report_task())
-    asyncio.create_task(_fear_greed_task())   # 🆕 F&G polling
+    asyncio.create_task(_fear_greed_task())        # 🆕 F&G polling
+    asyncio.create_task(_startup_sl_sync())        # 🚨 FIX: SL=0 bug sync
+    asyncio.create_task(_watchlist_refresh_task()) # ✅ C3: watchlist auto-refresh
 
     yield
 
@@ -915,9 +924,33 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             except Exception as _ml_e:
                 pass  # ML scorer не критичен
 
-        # ── SL / TP предварительные ──
-        stop_loss   = price * (1 + Config.SL_BUFFER / 100)
+        # ── ATR-dynamic SL (M1) для SHORT: SL ВЫШЕ входа ──────────────
+        # ✅ v2.1: ATR-based SL вместо фиксированного %
         entry_price = price
+        if Config.USE_ATR_SL and ohlcv_4h and len(ohlcv_4h) >= 14:
+            try:
+                _highs  = [c.high  for c in ohlcv_4h[-15:]]
+                _lows   = [c.low   for c in ohlcv_4h[-15:]]
+                _closes = [c.close for c in ohlcv_4h[-15:]]
+                _trs = []
+                for _i in range(1, len(_highs)):
+                    _tr = max(_highs[_i] - _lows[_i],
+                              abs(_highs[_i] - _closes[_i-1]),
+                              abs(_lows[_i]  - _closes[_i-1]))
+                    _trs.append(_tr)
+                _atr = sum(_trs[-14:]) / 14 if len(_trs) >= 14 else sum(_trs) / len(_trs)
+                _atr_sl = price + _atr * Config.ATR_SL_MULT   # SHORT: SL выше
+                _atr_sl_pct = (_atr_sl - price) / price * 100
+                if Config.ATR_SL_MIN <= _atr_sl_pct <= Config.ATR_SL_MAX:
+                    stop_loss = _atr_sl
+                    if verbose:
+                        print(f"{log_prefix} 📐 [ATR SL] ATR={_atr:.6f} × {Config.ATR_SL_MULT} → SL={stop_loss:.6f} ({_atr_sl_pct:.2f}%)")
+                else:
+                    stop_loss = price * (1 + Config.SL_BUFFER / 100)
+            except Exception:
+                stop_loss = price * (1 + Config.SL_BUFFER / 100)
+        else:
+            stop_loss = price * (1 + Config.SL_BUFFER / 100)
 
         # SMC refinement
         smc_data = {}
@@ -1438,6 +1471,112 @@ async def background_scanner():
             except Exception as e:
                 print(f"Scanner error: {e}")
         await asyncio.sleep(Config.SCAN_INTERVAL)
+
+
+async def _watchlist_refresh_task():
+    """✅ C3: Обновляем вотчлист каждые WATCHLIST_REFRESH_H часов."""
+    refresh_interval = int(Config.WATCHLIST_REFRESH_H * 3600)
+    print(f"[WATCHLIST] Авто-обновление каждые {Config.WATCHLIST_REFRESH_H:.1f}ч")
+    while state.is_running:
+        await asyncio.sleep(refresh_interval)
+        try:
+            old_count = len(state.watchlist)
+            new_wl = await _build_combined_watchlist(
+                state.binance, Config.MIN_VOLUME_USDT, Config.MAX_WATCHLIST
+            )
+            if new_wl:
+                state.watchlist = new_wl
+                print(f"[WATCHLIST] ✅ Обновлён: {old_count} → {len(new_wl)} монет")
+            else:
+                print("[WATCHLIST] ⚠️ Обновление пустое — оставляем старый")
+        except Exception as e:
+            print(f"[WATCHLIST] ❌ Ошибка: {e}")
+
+
+async def _startup_sl_sync():
+    """
+    🚨 FIX: SL=0.000000 bug — синхронизация при старте.
+
+    После запуска бота проверяем все BingX позиции.
+    Для каждой позиции без SL (stopLoss=0) ставим аварийный SL
+    на основе точки входа + SL_BUFFER из конфига.
+
+    Запускается 1 раз через 10 секунд после старта.
+    """
+    await asyncio.sleep(10)  # Ждём инициализации всех компонентов
+
+    if not state.auto_trader or not state.auto_trader.bingx:
+        print("[SL-SYNC] AutoTrader не инициализирован — пропускаем")
+        return
+
+    print("[SL-SYNC] 🔍 Проверка SL на всех BingX позициях...")
+    try:
+        positions = await state.auto_trader.bingx.get_positions()
+        if not positions:
+            print("[SL-SYNC] Нет открытых позиций")
+            return
+
+        fixed = 0
+        skipped = 0
+        for p in positions:
+            sym = p.symbol  # уже в формате "BTC-USDT"
+            direction = "long" if p.position_side == "LONG" else "short"
+            entry = p.entry_price
+
+            if p.stop_loss and p.stop_loss > 0:
+                # SL есть на бирже — проверяем Redis
+                _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
+                if _redis_sig and _f(_redis_sig.get("stop_loss", 0)) <= 0:
+                    _redis_sig["stop_loss"] = p.stop_loss
+                    state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
+                    print(f"[SL-SYNC] {sym}: Redis SL пустой, записан {p.stop_loss:.6f} с биржи")
+                continue
+
+            # SL отсутствует на бирже — рассчитываем аварийный
+            if entry <= 0:
+                skipped += 1
+                continue
+
+            sl_pct = Config.SL_BUFFER
+            if direction == "short":
+                sl = entry * (1 + sl_pct / 100)
+            else:
+                sl = entry * (1 - sl_pct / 100)
+
+            pos_side = p.position_side  # "LONG" / "SHORT"
+            ok = await state.auto_trader.bingx.update_stop_loss(sym, pos_side, sl, direction)
+
+            if ok:
+                fixed += 1
+                print(f"[SL-SYNC] ✅ {sym} {direction.upper()}: аварийный SL={sl:.6f} выставлен")
+                # Обновляем Redis
+                _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
+                if _redis_sig:
+                    _redis_sig["stop_loss"] = sl
+                    state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
+                # Уведомляем в TG
+                d_emoji = "🟢" if direction == "long" else "🔴"
+                await state.telegram.send_message(
+                    f"🚨 <b>SL SYNC</b> — аварийный стоп выставлен\n\n"
+                    f"{d_emoji} <code>#{sym}</code> {direction.upper()}\n"
+                    f"📍 Вход: <b>{entry:.6f}</b>\n"
+                    f"🛑 Новый SL: <b>{sl:.6f}</b> ({sl_pct}%)\n"
+                    f"<i>⚠️ Позиция не имела SL — исправлено при старте</i>"
+                )
+            else:
+                skipped += 1
+                print(f"[SL-SYNC] ❌ {sym}: не удалось выставить SL")
+
+        print(f"[SL-SYNC] Итого: {fixed} исправлено, {skipped} пропущено из {len(positions)}")
+
+    except Exception as e:
+        import traceback
+        print(f"[SL-SYNC] ❌ Ошибка: {e}\n{traceback.format_exc()}")
+
+
+def _f(v) -> float:
+    try:   return float(v)
+    except: return 0.0
 
 
 async def _fear_greed_task():

@@ -1,6 +1,6 @@
 """
-Aegis LONG Signal Engine v2.0
-Иерархия сигналов (mean-reversion LONG):
+Aegis LONG Signal Engine v2.1
+Иерархия сигналов (mean-reversion + momentum LONG):
 
   #1+#2  z_volume:      0.30  — Z-Score ниже VWAP + Volume Spike (капитуляция)
   #3     oi_change:     0.20  — OI падает + Short bias (шорты закрываются)
@@ -10,17 +10,30 @@ Aegis LONG Signal Engine v2.0
   #6     rsi_aux:       0.05  — RSI вспомогательный (НЕ gate)
 
 RSI НИКОГДА не блокирует сигнал. Только +/- корректирует.
+
+v2.1: ENV-управление z_volume gate + Momentum LONG bypass
+  Z_VOLUME_GATE_MIN (default=8): порог dump-exhaustion (было хардкод 20)
+  ENABLE_MOMENTUM_LONG (default=true): разрешить Momentum-обход z_volume
+  MOMENTUM_RSI_MIN (default=58): мин RSI для momentum mode
+  MOMENTUM_VOL_MIN (default=1.8): мин volume spike для momentum mode
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger("aegis.signal_engine_long")
+
+# ── ENV-конфиг z_volume gate + Momentum ──────────────────────────────────────
+_Z_VOLUME_GATE_MIN    = int(float(os.getenv("Z_VOLUME_GATE_MIN", "8")))      # было хардкод 20
+_ENABLE_MOMENTUM_LONG = os.getenv("ENABLE_MOMENTUM_LONG", "true").lower() == "true"
+_MOMENTUM_RSI_MIN     = float(os.getenv("MOMENTUM_RSI_MIN", "58"))           # RSI мин для momentum
+_MOMENTUM_VOL_MIN     = float(os.getenv("MOMENTUM_VOL_MIN", "1.8"))          # Volume spike мин
 
 
 class SignalStrengthLong(Enum):
@@ -351,15 +364,43 @@ class AegisLongSignalEngine:
 
         final_score = total_weighted
 
-        # HARD GATE: z_volume — главный индикатор mean-reversion LONG.
-        # Без признаков капитуляции (dump exhaustion) LONG невозможен по стратегии.
+        # GATE: z_volume — главный индикатор mean-reversion LONG.
+        # Порог настраивается через ENV Z_VOLUME_GATE_MIN (default=8, было 20).
+        # ✅ v2.1: Momentum LONG bypass — если RSI растущий + volume spike + тренд вверх,
+        #         обходим z_volume gate (стратегия Momentum, не Mean-Reversion).
         z_vol = components.get("z_volume")
-        if z_vol and z_vol.raw_score < 20:
-            logger.info(
-                f"[AEGIS REJECT LONG] {symbol}: z_volume={z_vol.raw_score:.0f} < 20 "
-                f"— нет признаков dump exhaustion, сигнал отклонён"
-            )
-            return None
+        _z_gate_failed = z_vol and z_vol.raw_score < _Z_VOLUME_GATE_MIN
+        if _z_gate_failed:
+            _momentum_bypass = False
+            if _ENABLE_MOMENTUM_LONG:
+                _rsi      = getattr(market_data, "rsi_1h", 50)     or 50
+                _vol_spk  = getattr(market_data, "volume_spike_ratio", 1.0) or 1.0
+                _p1h      = getattr(market_data, "price_change_1h", 0)      or 0
+                _p4h      = getattr(market_data, "price_change_4h", 0)      or 0
+                _p24h     = getattr(market_data, "price_change_24h", 0)     or 0
+                # Momentum: RSI высокий + volume spike + цена растёт
+                if (_rsi >= _MOMENTUM_RSI_MIN
+                        and _vol_spk >= _MOMENTUM_VOL_MIN
+                        and (_p1h > 0.3 or _p4h > 1.0 or _p24h > 2.0)):
+                    _momentum_bypass = True
+                    all_reasons.append(
+                        f"MOMENTUM LONG bypass: RSI={_rsi:.0f} Vol×{_vol_spk:.1f} "
+                        f"1H={_p1h:+.1f}% 4H={_p4h:+.1f}%"
+                    )
+                    logger.info(
+                        f"[AEGIS MOMENTUM] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"→ Momentum bypass (RSI={_rsi:.0f} Vol×{_vol_spk:.1f})"
+                    )
+                    # Бонус за momentum в score
+                    if _p24h > 10: final_score = min(final_score + 10, 100)
+                    elif _p24h > 5: final_score = min(final_score + 5, 100)
+
+            if not _momentum_bypass:
+                logger.info(
+                    f"[AEGIS REJECT LONG] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                    f"— нет признаков dump exhaustion или momentum, сигнал отклонён"
+                )
+                return None
 
         if base_score > 0:
             if base_score >= 70:

@@ -283,6 +283,11 @@ class AutoTrader:
             print(f"{pfx} ❌ SKIP — SL too small ({sl_distance:.4%})")
             return None
 
+        # 🚨 FIX: Никогда не открываем позицию без валидного SL
+        if not stop_loss or stop_loss <= 0:
+            print(f"{pfx} ❌ SKIP — stop_loss=0 (critical: no SL defined)")
+            return None
+
         position_value = risk_amount / sl_distance
         leverage       = self._calc_leverage(signal_score)
         size           = position_value / entry_price

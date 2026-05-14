@@ -287,18 +287,21 @@ def filter_mid_range(
     if status == "mid_range":
         return False, f"MID_RANGE: цена в {consolidation.position_in_range:.0%} диапазона {consolidation.range_pct:.1f}%"
 
-    # Для LONG — только нижняя половина или Spring
+    # Для LONG — только нижняя половина или Spring/Breakout
     if direction == "long":
         if consolidation.has_spring:
             return True, "SPRING detected — ложный пробой вниз"
         if consolidation.has_breakout_up:
-            return True, "BREAKOUT UP — пробой консолидации"
+            return True, "BREAKOUT UP — пробой консолидации вверх ✅ Momentum"
         if status == "near_support":
             return True, "near support"
         if status in ("upper_half", "near_resistance"):
-            # ✅ FIX #4: Экстремальная перепроданность важнее позиции в диапазоне
-            if rsi_1h < 25:
-                return True, f"LONG в {status} РАЗРЕШЁН — RSI 1H={rsi_1h:.1f} экстремально перепродан"
+            # ✅ v2.1: RSI 25→35 для LONG: разрешаем при перепроданности выше порога
+            # ✅ v2.1: near_resistance разрешаем при strong momentum (RSI > 60 + breakout-zone)
+            if rsi_1h < 35:
+                return True, f"LONG в {status} РАЗРЕШЁН — RSI 1H={rsi_1h:.1f} перепродан"
+            if status == "near_resistance" and rsi_1h > 60:
+                return True, f"LONG в {status} РАЗРЕШЁН — Momentum RSI 1H={rsi_1h:.1f}"
             return False, f"LONG в {status} — плохая зона для входа"
         return True, "lower half"
 

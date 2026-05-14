@@ -487,6 +487,59 @@ class PositionTracker:
             except Exception as e:
                 print(f"⚠️ [ZOMBIE-CLEANUP] {symbol}: {e}")
 
+    async def _recover_sl(self, signal: Dict) -> float:
+        """
+        🚨 Восстанавливает SL=0 позиции:
+          1. Пробуем взять SL из BingX positions API (stopLoss поле)
+          2. Если BingX тоже вернул 0 — вычисляем аварийный SL (SL_BUFFER%)
+          3. Ставим аварийный SL на биржу
+
+        Вызывается когда stop_loss == 0 в Redis-записи.
+        """
+        symbol    = signal.get("symbol", "")
+        direction = signal.get("direction", "long")
+        entry     = _f(signal.get("entry_price", 0))
+        pos_side  = "LONG" if direction == "long" else "SHORT"
+
+        # ── Шаг 1: пробуем BingX positions API ──────────────────────────────
+        if self.auto_trader and self.auto_trader.bingx:
+            try:
+                bingx_sym = symbol + "-USDT" if "-USDT" not in symbol else symbol
+                positions = await self.auto_trader.bingx.get_positions(bingx_sym)
+                for p in positions:
+                    if p.position_side == pos_side and p.stop_loss and p.stop_loss > 0:
+                        print(f"✅ [PT][SL-RECOVER][{symbol}] SL={p.stop_loss:.6f} получен с BingX")
+                        return p.stop_loss
+            except Exception as e:
+                print(f"⚠️ [PT][SL-RECOVER][{symbol}] BingX error: {e}")
+
+        # ── Шаг 2: аварийный SL из конфига ──────────────────────────────────
+        if entry > 0:
+            sl_pct = float(getattr(self.config, 'SL_BUFFER', 2.0))
+            if direction == "short":
+                sl = entry * (1 + sl_pct / 100)
+            else:
+                sl = entry * (1 - sl_pct / 100)
+            print(f"🚨 [PT][SL-RECOVER][{symbol}] Аварийный SL={sl:.6f} ({sl_pct}% от входа)")
+
+            # ── Шаг 3: ставим SL на биржу ────────────────────────────────────
+            if self.auto_trader and self.auto_trader.bingx:
+                try:
+                    bingx_sym = symbol + "-USDT" if "-USDT" not in symbol else symbol
+                    ok = await self.auto_trader.bingx.update_stop_loss(
+                        bingx_sym, pos_side, sl, direction
+                    )
+                    if ok:
+                        print(f"✅ [PT][SL-RECOVER][{symbol}] SL выставлен на бирже: {sl:.6f}")
+                    else:
+                        print(f"⚠️ [PT][SL-RECOVER][{symbol}] Не удалось выставить SL на бирже")
+                except Exception as e:
+                    print(f"⚠️ [PT][SL-RECOVER][{symbol}] place SL error: {e}")
+            return sl
+
+        print(f"❌ [PT][SL-RECOVER][{symbol}] entry=0 — невозможно рассчитать аварийный SL")
+        return 0.0
+
     async def _check_one(self, signal: Dict):
         symbol    = signal.get("symbol", "")
         entry     = _f(signal.get("entry_price", 0))
@@ -499,9 +552,21 @@ class PositionTracker:
         if not symbol or not entry:
             return
 
+        # 🚨 FIX: SL=0.000000 bug — восстанавливаем SL если он отсутствует
+        if sl <= 0:
+            print(f"🚨 [PT][{symbol}] SL=0 обнаружен — запускаем восстановление SL...")
+            sl = await self._recover_sl(signal)
+            if sl > 0:
+                signal["stop_loss"] = sl
+                self._save(symbol, signal)
+                print(f"✅ [PT][{symbol}] SL восстановлен: {sl:.6f}")
+            else:
+                print(f"❌ [PT][{symbol}] SL=0 — пропускаем позицию (невозможно отследить)")
+                return
+
         # 🎢 Phase 2: Инициализация Micro-Step Trailing при первом обнаружении позиции
         trailing_state = self.micro_trailing.get_state(symbol)
-        if trailing_state is None and len(taken) == 0:
+        if trailing_state is None and sl > 0:
             # Новая позиция — инициализируем трейлинг
             self.micro_trailing.initialize(
                 symbol=symbol,
