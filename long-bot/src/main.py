@@ -161,9 +161,17 @@ class Config:
     ATR_SL_MAX  = float(os.getenv("ATR_SL_MAX_PCT", "4.0")) # макс SL не больше 4%
 
     # Momentum LONG (M2)
-    ENABLE_MOMENTUM_LONG = os.getenv("ENABLE_MOMENTUM_LONG", "true").lower() == "true"
-    MOMENTUM_RSI_MIN     = float(os.getenv("MOMENTUM_RSI_MIN", "58"))
-    MOMENTUM_VOL_MIN     = float(os.getenv("MOMENTUM_VOL_MIN", "1.8"))
+    ENABLE_MOMENTUM_LONG     = os.getenv("ENABLE_MOMENTUM_LONG", "true").lower() == "true"
+    MOMENTUM_RSI_MIN         = float(os.getenv("MOMENTUM_RSI_MIN", "58"))
+    MOMENTUM_VOL_MIN         = float(os.getenv("MOMENTUM_VOL_MIN", "1.8"))
+    # ✅ FIX: MOMENTUM PATH — отдельный порог для momentum сделок (bypass BASE_SCORER gate)
+    MOMENTUM_SCORE_THRESHOLD = int(os.getenv("MOMENTUM_SCORE_THRESHOLD", "58"))
+
+    # ✅ FIX: AEGIS_LONG_MIN_SCORE — реальный порог Aegis engine (был мёртвым ENV, теперь работает)
+    AEGIS_MIN_SCORE    = int(os.getenv("AEGIS_LONG_MIN_SCORE", "52"))
+
+    # ✅ FIX: Adaptive threshold ceiling — max +N от MIN_LONG_BASE_SCORE (было хардкод 78)
+    ADAPTIVE_MAX_BOOST = int(os.getenv("ADAPTIVE_MAX_BOOST", "3"))
 
     # ✅ Постоянный блэклист — символы которые всегда пропускаем
     # Формат ENV: SYMBOL_BLACKLIST=GIGAUSDT,LUNAUSDT,我踏马来了USDT
@@ -355,7 +363,7 @@ async def lifespan(app: FastAPI):
         bsl_scanner=state.bsl_scanner,
         wyckoff_detector=state.wyckoff_detector,
         delta_analyzer=None,
-        min_score=Config.MIN_SCORE,
+        min_score=Config.AEGIS_MIN_SCORE,  # ✅ FIX: теперь читает AEGIS_LONG_MIN_SCORE (было MIN_LONG_SCORE=52)
     ) if Config.ENABLE_AEGIS_ENGINE else None
 
     state.dca_engine = SmartDCALongEngine(GridConfigLong(
@@ -730,6 +738,32 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 _dedup.append(_p)
         patterns = _dedup[:8]  # топ-8 паттернов
 
+        # ✅ FIX P5: CASCADE → synthetic PatternResult
+        # Когда CASCADE обнаружен (Fractal Raid + SNR + FVG) но patterns=0 → добавляем синтетический паттерн
+        # Это исправляет RONINUSDT/MANTAUSDT где CASCADE обнаружен но Patterns=0
+        _cas_p5 = getattr(md, "cascade_signal", None)
+        if _cas_p5 is not None and _cas_p5.has_signal and _cas_p5.direction == "long":
+            try:
+                from core.pattern_detector import PatternResult as _PR
+                # CASCADE = аналог LIQUIDITY_SWEEP_LONG по силе
+                _cas_bonus = min(int(_cas_p5.score_bonus * 0.8), 20)
+                _already_has_pattern = any(
+                    p.name in ("LIQUIDITY_SWEEP_LONG", "BREAKOUT_LONG", "CASCADE_LONG") for p in patterns
+                )
+                if not _already_has_pattern:
+                    patterns.append(_PR(
+                        name="CASCADE_LONG",
+                        score_bonus=_cas_bonus,
+                        confidence=0.75,
+                        direction="long",
+                        reasons=[f"CASCADE: {_cas_p5.description[:60]}"],
+                    ))
+                    if verbose:
+                        print(f"{log_prefix} 🎯 [CASCADE→PATTERN] CASCADE_LONG score={_cas_bonus} (было Patterns=0)")
+            except Exception as _cas_p5_e:
+                if verbose:
+                    print(f"{log_prefix} ⚠️ [CASCADE→PATTERN] {_cas_p5_e}")
+
         # ✅ FIX #6: Wyckoff результат конвертируется в PatternResult для scorer
         # Ранее Wyckoff давал бонус только внутри signal_engine, но не попадал в
         # LongScorer.calculate_pattern_component() → ACCUMULATION всегда = 0
@@ -841,22 +875,52 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 fg_modifier, fg_reason = -3, f"🧠 [F&G] {fg} Умеренная жадность → LONG -3"
 
         raw_score       = base_result.total_score
-        effective_score = max(min(raw_score + fg_modifier + _mtf_bonus, 100), 0)
+        # ✅ FIX P1: CASCADE учитывается ДО gate-проверки (раньше применялся после → RONIN/MANTA отсеивались)
+        _cas_pre = getattr(md, "cascade_signal", None)
+        _cas_pre_bonus = 0
+        if _cas_pre is not None and _cas_pre.has_signal and _cas_pre.direction == "long":
+            # Конвертируем CASCADE bonus → BASE_SCORER очки (60% от оригинала)
+            if _cas_pre.score_bonus >= 14:   _cas_pre_bonus = 10
+            elif _cas_pre.score_bonus >= 10: _cas_pre_bonus = 7
+            elif _cas_pre.score_bonus >= 8:  _cas_pre_bonus = 5
+            elif _cas_pre.score_bonus >= 6:  _cas_pre_bonus = 3
+        effective_score = max(min(raw_score + fg_modifier + _mtf_bonus + _cas_pre_bonus, 100), 0)
         min_score       = state.scorer.min_score
 
         if verbose:
             fg_str  = f" F&G={fg_modifier:+d}" if fg_modifier != 0 else ""
             mtf_str = f" MTF={_mtf_bonus:+d}"  if _mtf_bonus  != 0 else ""
-            print(f"{log_prefix} 📊 [BASE_SCORER] score={raw_score}{fg_str}{mtf_str} → {effective_score} (min={min_score})"
+            cas_str = f" CASCADE={_cas_pre_bonus:+d}" if _cas_pre_bonus > 0 else ""
+            print(f"{log_prefix} 📊 [BASE_SCORER] score={raw_score}{fg_str}{mtf_str}{cas_str} → {effective_score} (min={min_score})"
                   f" | components: {[(c.name, c.score) for c in base_result.components]}")
+            if _cas_pre_bonus > 0:
+                print(f"{log_prefix} 🎯 [CASCADE PRE-GATE] +{_cas_pre_bonus}pts (bonus={_cas_pre.score_bonus}) → помогает пройти gate")
             if base_result.funding_info:
                 print(f"{log_prefix} 💰 {base_result.funding_info}")
 
         if effective_score < min_score:
-            if verbose:
-                print(f"{log_prefix} ❌ [BASE_SCORER] is_valid=False — базовый скоринг отклонил")
-                if fg_reason: print(f"{log_prefix} {fg_reason}")
-            return None
+            # ✅ FIX P2: MOMENTUM PATH bypass — отдельный порог для momentum сделок
+            # Если RSI растущий + volume spike + тренд → разрешаем даже при слабом mean-rev score
+            _byp_rsi = getattr(md, "rsi_1h", 50) or 50
+            _byp_vol = getattr(md, "volume_spike_ratio", 1.0) or 1.0
+            _byp_p1h = getattr(md, "price_change_1h", 0) or 0
+            _byp_p4h = getattr(md, "price_change_4h", 0) or 0
+            _momentum_bypass = (
+                Config.ENABLE_MOMENTUM_LONG
+                and effective_score >= Config.MOMENTUM_SCORE_THRESHOLD
+                and _byp_rsi >= Config.MOMENTUM_RSI_MIN
+                and _byp_vol >= Config.MOMENTUM_VOL_MIN
+                and (_byp_p1h > 0.3 or _byp_p4h > 1.0)
+            )
+            if _momentum_bypass:
+                if verbose:
+                    print(f"{log_prefix} 🚀 [MOMENTUM PATH] score={effective_score} >= threshold={Config.MOMENTUM_SCORE_THRESHOLD}"
+                          f" | RSI={_byp_rsi:.0f} Vol×{_byp_vol:.1f} 1H={_byp_p1h:+.1f}% — bypass mean-rev gate")
+            else:
+                if verbose:
+                    print(f"{log_prefix} ❌ [BASE_SCORER] is_valid=False — базовый скоринг отклонил")
+                    if fg_reason: print(f"{log_prefix} {fg_reason}")
+                return None
 
         if verbose and fg_reason:
             print(f"{log_prefix} {fg_reason}")
@@ -891,11 +955,20 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             # ✅ FIX #4: передаём RSI 1H для исключения при экстремальной перепроданности
             rsi_1h_val = getattr(md, "rsi_1h", 50.0) or 50.0
             allow, reason = filter_mid_range(cons, price, "long", verbose=False, rsi_1h=rsi_1h_val)
-            
+
             if cons.is_consolidating and not allow:
-                if verbose:
-                    print(f"{log_prefix} ❌ [CONSOLIDATION] {reason}")
-                return None
+                # ✅ FIX P4: CONSOLIDATION softening — сильный сигнал + breakout override
+                _cons_bypass = (
+                    base_score >= 75
+                    and (cons.has_breakout_up or cons.has_spring)
+                )
+                if _cons_bypass:
+                    if verbose:
+                        print(f"{log_prefix} 🟡 [CONSOLIDATION BYPASS] score={base_score:.0f}≥75 + breakout/spring → override {reason}")
+                else:
+                    if verbose:
+                        print(f"{log_prefix} ❌ [CONSOLIDATION] {reason}")
+                    return None
             
             if cons.has_spring and cons.is_consolidating:
                 base_score += 12  # Бонус за Spring
@@ -1264,20 +1337,23 @@ async def scan_market():
     print(f"📡 {btc_label} (score adj {btc_adj:+d})")
 
     # ── ADAPTIVE MIN_SCORE ───────────────────────────────────────────────────
-    _base_aegis = Config.MIN_SCORE
+    # ✅ FIX P3: Adaptive base = MIN_LONG_BASE_SCORE (было Config.MIN_SCORE=52 → игнорировало ENV)
+    # Adaptive ceiling = base + ADAPTIVE_MAX_BOOST (было хардкод 78, теперь base+3 макс)
+    _base_aegis = int(os.getenv("MIN_LONG_BASE_SCORE", "58"))  # читаем напрямую, не через Config
     _adaptive_score = _base_aegis
     _fg = state.fear_greed_index
     if _fg is not None:
         if _fg < 20:   _adaptive_score -= 5  # экстремальный страх → покупаем
         elif _fg < 35: _adaptive_score -= 2
-        elif _fg > 75: _adaptive_score += 5  # жадность → осторожно с лонгами
-        elif _fg > 65: _adaptive_score += 2
+        elif _fg > 75: _adaptive_score += Config.ADAPTIVE_MAX_BOOST   # жадность → осторожно с лонгами
+        elif _fg > 65: _adaptive_score += max(1, Config.ADAPTIVE_MAX_BOOST - 2)
     if _btc_cache_1h is not None:
-        if _btc_cache_1h < -3.0: _adaptive_score += 3
+        if _btc_cache_1h < -3.0: _adaptive_score += 2
         elif _btc_cache_1h > 2.0: _adaptive_score -= 2
-    _adaptive_score = max(62, min(78, _adaptive_score))
+    # Clamp: не выше base+ADAPTIVE_MAX_BOOST, не ниже base-5
+    _adaptive_score = max(_base_aegis - 5, min(_base_aegis + Config.ADAPTIVE_MAX_BOOST, _adaptive_score))
     if _adaptive_score != _base_aegis:
-        print(f"🎯 [ADAPTIVE] LONG Aegis: {_base_aegis} → {_adaptive_score} (F&G={_fg})")
+        print(f"🎯 [ADAPTIVE] LONG min: {_base_aegis} → {_adaptive_score} (F&G={_fg}, BTC={_btc_cache_1h})")
     state._adaptive_min_score = _adaptive_score
 
     active_count  = await _count_long_positions()
