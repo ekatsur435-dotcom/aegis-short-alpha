@@ -16,11 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Any
 
 logger = logging.getLogger("aegis.signal_engine")
+
+# ✅ FIX: Z_VOLUME_GATE_MIN теперь читается из ENV (было хардкод 15)
+_Z_VOLUME_GATE_MIN = int(float(os.getenv("Z_VOLUME_GATE_MIN_SHORT", os.getenv("Z_VOLUME_GATE_MIN", "15"))))
 
 
 class SignalStrength(Enum):
@@ -345,8 +349,9 @@ class AegisSignalEngine:
 
         # HARD GATE: z_volume — главный индикатор SHORT (памп/перекупленность).
         # Без признаков pump exhaustion SHORT невозможен по стратегии.
+        # ✅ FIX: порог читается из ENV Z_VOLUME_GATE_MIN_SHORT (было хардкод 15)
         z_vol = components.get("z_volume")
-        if z_vol and z_vol.raw_score < 15:
+        if z_vol and z_vol.raw_score < _Z_VOLUME_GATE_MIN:
             logger.info(
                 f"[AEGIS REJECT] {symbol}: z_volume={z_vol.raw_score:.0f} < 15 "
                 f"— нет признаков pump exhaustion, сигнал отклонён"
