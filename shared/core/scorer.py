@@ -102,6 +102,11 @@ LONG_PATTERN_STRENGTHS = {
     "TRAP_SHORT":               18,
     "REJECTION_LONG":           15,
     "ACCUMULATION":             22,
+    # P2: Flag / Pennant (78% точность — continuation паттерны)
+    "FLAG_LONG":                15,
+    "PENNANT_LONG":             12,
+    # CASCADE синтетический
+    "CASCADE_LONG":             18,
 }
 
 SHORT_PATTERN_STRENGTHS = {
@@ -118,6 +123,11 @@ SHORT_PATTERN_STRENGTHS = {
     "TRAP_LONG":                18,
     "REJECTION_SHORT":          15,
     "DISTRIBUTION":             22,
+    # P2: Flag / Pennant (78% точность — continuation паттерны)
+    "FLAG_SHORT":               15,
+    "PENNANT_SHORT":            12,
+    # CASCADE синтетический
+    "CASCADE_SHORT":            18,
 }
 
 
