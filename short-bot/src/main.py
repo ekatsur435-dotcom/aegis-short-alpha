@@ -938,7 +938,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             cons = state.consolidation_detector.detect(ohlcv_15m, price)
             # ✅ FIX #4: передаём RSI 1H для исключения при экстремальной перегретости
             rsi_1h_val = getattr(md, "rsi_1h", 50.0) or 50.0
-            allow, reason = filter_mid_range(cons, price, "short", verbose=False, rsi_1h=rsi_1h_val)
+            # ✅ FIX #5: HTF bearish → SHORT в lower_half = продолжение тренда, порог RSI снижен до 65
+            _htf_is_bearish = "bear" in _htf_str.lower() or "bearish" in _htf_str.lower()
+            allow, reason = filter_mid_range(cons, price, "short", verbose=False, rsi_1h=rsi_1h_val, htf_bearish=_htf_is_bearish)
             
             if cons.is_consolidating and not allow:
                 # ✅ FIX P4: score≥75 + upthrust/breakout_down → bypass (аналог LONG бота)

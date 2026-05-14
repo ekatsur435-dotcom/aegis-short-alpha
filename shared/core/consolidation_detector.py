@@ -268,12 +268,17 @@ def filter_mid_range(
     direction: str,
     verbose: bool = False,
     rsi_1h: float = 50.0,
+    htf_bearish: bool = False,
+    htf_bullish: bool = False,
 ) -> Tuple[bool, str]:
     """
     Фильтр: блокировать входы в середине диапазона.
     ✅ FIX #4: Исключение для экстремальной перепроданности/перегретости:
        LONG: RSI 1H < 25 → пропускаем upper_half блокировку
        SHORT: RSI 1H > 75 → пропускаем lower_half блокировку
+    ✅ FIX #5 (HTF): Когда HTF структура медвежья, SHORT в lower_half
+       допускается при RSI > 65 (вместо 75) — продолжение тренда, а не разворот.
+       Аналогично LONG: HTF бычий + upper_half допускается при RSI < 40.
 
     Returns:
         (allow_signal: bool, reason: str)
@@ -302,6 +307,9 @@ def filter_mid_range(
                 return True, f"LONG в {status} РАЗРЕШЁН — RSI 1H={rsi_1h:.1f} перепродан"
             if status == "near_resistance" and rsi_1h > 60:
                 return True, f"LONG в {status} РАЗРЕШЁН — Momentum RSI 1H={rsi_1h:.1f}"
+            # ✅ FIX #5: HTF бычий → LONG в верхней половине = продолжение тренда (порог RSI < 40)
+            if htf_bullish and rsi_1h < 40:
+                return True, f"LONG в {status} РАЗРЕШЁН — HTF BULLISH + RSI 1H={rsi_1h:.1f}"
             return False, f"LONG в {status} — плохая зона для входа"
         return True, "lower half"
 
@@ -317,6 +325,9 @@ def filter_mid_range(
             # ✅ FIX #4: Экстремальная перегретость важнее позиции в диапазоне
             if rsi_1h > 75:
                 return True, f"SHORT в {status} РАЗРЕШЁН — RSI 1H={rsi_1h:.1f} экстремально перегрет"
+            # ✅ FIX #5: HTF медвежий → SHORT в нижней половине = продолжение тренда (порог снижен до 65)
+            if htf_bearish and rsi_1h > 65:
+                return True, f"SHORT в {status} РАЗРЕШЁН — HTF BEARISH + RSI 1H={rsi_1h:.1f}"
             return False, f"SHORT в {status} — плохая зона для входа"
         return True, "upper half"
 

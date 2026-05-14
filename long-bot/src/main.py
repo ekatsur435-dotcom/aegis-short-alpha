@@ -1015,7 +1015,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             cons = state.consolidation_detector.detect(ohlcv_15m, price)
             # ✅ FIX #4: передаём RSI 1H для исключения при экстремальной перепроданности
             rsi_1h_val = getattr(md, "rsi_1h", 50.0) or 50.0
-            allow, reason = filter_mid_range(cons, price, "long", verbose=False, rsi_1h=rsi_1h_val)
+            # ✅ FIX #5: HTF bullish → LONG в upper_half = продолжение тренда, порог RSI снижен до 40
+            _htf_is_bullish = "bull" in _htf_str.lower() or "bullish" in _htf_str.lower()
+            allow, reason = filter_mid_range(cons, price, "long", verbose=False, rsi_1h=rsi_1h_val, htf_bullish=_htf_is_bullish)
 
             if cons.is_consolidating and not allow:
                 # ✅ FIX P4: CONSOLIDATION softening — сильный сигнал + breakout override
