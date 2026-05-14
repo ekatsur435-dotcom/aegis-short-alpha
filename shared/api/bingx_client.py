@@ -292,11 +292,20 @@ class BingXClient:
     # POSITIONS
     # =========================================================================
 
-    async def get_positions(self, symbol=None) -> List[BingXPosition]:
+    async def get_positions(self, symbol=None, raise_on_api_error: bool = False) -> List[BingXPosition]:
+        """
+        Получает открытые позиции.
+        raise_on_api_error=True → бросает RuntimeError если BingX вернул None (429, сеть, etc.)
+        Это критично для zombie-cleanup: пустой [] из-за API ошибки ≠ "позиции нет".
+        """
         params = {"symbol": symbol} if symbol else {}
         result = await self._make_request("GET", "/openApi/swap/v2/user/positions", params=params)
+        if result is None:
+            if raise_on_api_error:
+                raise RuntimeError(f"BingX positions API недоступен: {self.last_error or 'нет ответа'}")
+            return []
         positions = []
-        if result and result.get("code") == 0:
+        if result.get("code") == 0:
             for d in result.get("data", []):
                 try:
                     size = float(d.get("positionAmt", 0))

@@ -395,12 +395,28 @@ class PositionTracker:
                     continue
 
                 pos_side = 'LONG' if direction == 'long' else 'SHORT'
-                positions = await bingx.get_positions(symbol)
+                # ✅ FIX zombie: raise_on_api_error=True → если API недоступен (429, сеть)
+                # RuntimeError → попадает в except ниже → символ пропускается, позиция НЕ удаляется
+                positions = await bingx.get_positions(symbol, raise_on_api_error=True)
                 has_real_position = any(
                     abs(p.size) > 0 and p.position_side == pos_side
                     for p in positions
                 )
                 if not has_real_position:
+                    # ✅ FIX zombie: не удаляем позиции младше 2ч — API мог ответить
+                    # пустым списком из-за задержки после открытия или временного сбоя.
+                    _ts_raw = sig.get('timestamp', '')
+                    _age_hours = 999.0
+                    if _ts_raw:
+                        try:
+                            _dt = datetime.fromisoformat(_ts_raw.replace('Z', '+00:00'))
+                            _age_hours = (datetime.utcnow() - _dt.replace(tzinfo=None)).total_seconds() / 3600
+                        except Exception:
+                            pass
+                    if _age_hours < 2.0:
+                        print(f"[ZOMBIE-SKIP] {symbol}: не найдена на бирже, но возраст={_age_hours:.1f}ч < 2ч → пропускаем")
+                        continue
+
                     # Позиция есть в Redis, нет на бирже — это zombie
                     entry = sig.get('entry_price', 0)
                     redis_price = sig.get('last_price', entry)
@@ -1208,22 +1224,22 @@ class PositionTracker:
                 print(f"[PT][ZOMBIE] ✅ Нет позиций в Redis для проверки")
                 return 0
                 
-            # Получаем позиции с биржи
+            # Получаем позиции с биржи (raise_on_api_error=True — abort если API недоступен)
             try:
-                bingx_positions = await self.bingx.get_positions()
+                bingx_positions = await self.bingx.get_positions(raise_on_api_error=True)
             except Exception as e:
-                print(f"[PT][ZOMBIE] ⚠️ Ошибка получения позиций с биржи: {e}")
+                print(f"[PT][ZOMBIE] ⚠️ Ошибка получения позиций с биржи: {e} → пропускаем cleanup")
                 return 0
-                
+
             # Создаем множество символов с позициями на бирже
+            # BingXPosition — dataclass, используем атрибуты (не .get())
             bingx_symbols = set()
             if isinstance(bingx_positions, list):
                 for pos in bingx_positions:
-                    symbol = pos.get("symbol", "")
-                    if symbol:
-                        # Нормализуем символ (убираем - если есть)
-                        bingx_symbols.add(symbol.replace("-", ""))
-                        bingx_symbols.add(symbol)  # И с дефисом тоже
+                    sym = getattr(pos, "symbol", "") or ""
+                    if sym:
+                        bingx_symbols.add(sym.replace("-", ""))
+                        bingx_symbols.add(sym)
                         
             print(f"[PT][ZOMBIE] 🔍 Проверяем {len(redis_positions)} позиций в Redis vs {len(bingx_symbols)} на бирже")
             
@@ -1240,23 +1256,39 @@ class PositionTracker:
                         break
                         
                 if not on_exchange:
-                    # Проверяем можно ли получить цену (символ существует)
+                    # ✅ FIX zombie: проверяем возраст позиции перед удалением
+                    sig_data = redis_positions.get(symbol, {})
+                    if isinstance(sig_data, str):
+                        try:
+                            import json as _j; sig_data = _j.loads(sig_data)
+                        except Exception:
+                            sig_data = {}
+                    _ts_raw = sig_data.get("timestamp", "") if isinstance(sig_data, dict) else ""
+                    _age_hours = 999.0
+                    if _ts_raw:
+                        try:
+                            _dt = datetime.fromisoformat(_ts_raw.replace('Z', '+00:00'))
+                            _age_hours = (datetime.utcnow() - _dt.replace(tzinfo=None)).total_seconds() / 3600
+                        except Exception:
+                            pass
+                    if _age_hours < 2.0:
+                        print(f"[PT][ZOMBIE] ⏳ Пропускаем {symbol}: возраст={_age_hours:.1f}ч < 2ч")
+                        continue
+
+                    # Проверяем можно ли получить цену (символ существует).
+                    # Ticker ТОЛЬКО определяет делист/не делист — НЕ является основанием для удаления.
+                    # get_positions() уже вернул пустой список успешно → это реальный zombie.
                     try:
                         ticker = await self.bingx.get_ticker(symbol)
                         if ticker and ticker.get("price", 0) > 0:
-                            # Символ существует, но позиции нет - это zombie
                             print(f"[PT][ZOMBIE] 🗑️ Удаляем {symbol} (нет на бирже, цена доступна)")
-                            self.redis.remove_position(self.bot_type, symbol)
-                            removed_count += 1
                         else:
-                            # Не можем получить цену - возможно символ делистед
-                            print(f"[PT][ZOMBIE] 🗑️ Удаляем {symbol} (нет на бирже, цена недоступна - делист)")
-                            self.redis.remove_position(self.bot_type, symbol)
-                            removed_count += 1
-                    except Exception as e:
-                        print(f"[PT][ZOMBIE] 🗑️ Удаляем {symbol} (ошибка проверки: {e})")
+                            print(f"[PT][ZOMBIE] 🗑️ Удаляем {symbol} (нет на бирже, делист/нет цены)")
                         self.redis.remove_position(self.bot_type, symbol)
                         removed_count += 1
+                    except Exception as e:
+                        # Ticker тоже не ответил — не удаляем, возможно API временно недоступен
+                        print(f"[PT][ZOMBIE] ⚠️ Пропускаем {symbol}: ticker ошибка {e}")
                         
             if removed_count > 0:
                 print(f"[PT][ZOMBIE] ✅ Очищено {removed_count} zombie позиций")
