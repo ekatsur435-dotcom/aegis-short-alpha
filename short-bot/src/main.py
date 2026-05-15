@@ -1122,7 +1122,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             stop_loss = price * (1 + Config.SL_BUFFER / 100)
             sl_pct    = Config.SL_BUFFER
 
-        # ── #33 Trend Following detector ─────────────────────────────────────
+        # ── #33/#34 Trend Following detector (bonus + counter-trend penalty) ──
         _trend_result = None
         try:
             from core.trend_detector import detect_trend
@@ -1130,14 +1130,16 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 candles_4h=ohlcv_4h,
                 price_change_1h=getattr(md, "price_change_1h", 0.0) or 0.0,
                 price_change_4h=getattr(md, "price_change_4h", 0.0) or 0.0,
+                price_change_1d=getattr(md, "price_change_24h", 0.0) or 0.0,
                 volume_spike_ratio=getattr(md, "volume_spike_ratio", 1.0) or 1.0,
                 direction="short",
             )
             if _trend_result and _trend_result.has_trend:
-                base_score = min(100, base_score + _trend_result.score_bonus)
+                base_score = max(0, min(100, base_score + _trend_result.score_bonus))
                 if verbose:
                     print(f"{log_prefix} {_trend_result.description}")
         except Exception as _tr_e:
+            logger.debug(f"[TrendDetector] short: {_tr_e}")
             pass
 
         # Dynamic TP

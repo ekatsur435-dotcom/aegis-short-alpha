@@ -113,6 +113,20 @@ services:
         value: "55"             # Минимальный BASE score для активации bypass
       - key: FUNDING_EXTREME_SHORT
         value: "0.05"           # ≥0.05%→score60, ≥0.10%→75, ≥0.15%→90 в AEGIS + BASE +10
+      - key: ENABLE_TREND_DETECTOR
+        value: "true"
+      - key: TREND_SCORE_BONUS
+        value: "8"              # +8 к base_score при 2/4 условий в направлении SHORT
+      - key: TREND_SCORE_PENALTY
+        value: "10"             # −10 к base_score при 2/4 условий ПРОТИВ направления SHORT
+      - key: TREND_MOMENTUM_4H
+        value: "1.5"            # Мин 4H движение %
+      - key: TREND_MOMENTUM_1H
+        value: "0.3"            # Мин 1H движение %
+      - key: TREND_MOMENTUM_1D
+        value: "2.5"            # Мин 1D движение % (proxy из 6×4H)
+      - key: TREND_VOLUME_MULT
+        value: "1.3"            # Мин volume surge ×
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
@@ -219,3 +233,17 @@ services:
         value: "true"           # false = отключить фильтр консолидации полностью
       - key: FUNDING_EXTREME_LONG
         value: "-0.05"          # ≤-0.05%→score60, ≤-0.10%→75, ≤-0.15%→90 в AEGIS + BASE +10
+      - key: ENABLE_TREND_DETECTOR
+        value: "true"
+      - key: TREND_SCORE_BONUS
+        value: "8"              # +8 к base_score при 2/4 условий в направлении LONG
+      - key: TREND_SCORE_PENALTY
+        value: "10"             # −10 к base_score при 2/4 условий ПРОТИВ направления LONG
+      - key: TREND_MOMENTUM_4H
+        value: "1.5"
+      - key: TREND_MOMENTUM_1H
+        value: "0.3"
+      - key: TREND_MOMENTUM_1D
+        value: "2.5"
+      - key: TREND_VOLUME_MULT
+        value: "1.3"
