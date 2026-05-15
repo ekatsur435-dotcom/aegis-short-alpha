@@ -35,6 +35,8 @@ _Z_OUTFLOW_LOW    = float(os.getenv("ONCHAIN_Z_OUTFLOW", "-1.5")) # z < этог
 _ADDR_ANOMALY_PCT = float(os.getenv("ONCHAIN_ADDR_ANOMALY_PCT", "20.0"))  # % для #35
 _CMC_API_KEY      = os.getenv("COINMARKETCAP_API_KEY", "")        # CMC fallback
 _CMC_BASE_URL     = "https://pro-api.coinmarketcap.com"
+_CC_API_KEY       = os.getenv("CRYPTOCOMPARE_API_KEY", "")        # CryptoCompare fallback (3-й)
+_CC_BASE_URL      = "https://min-api.cryptocompare.com"
 _CG_ID_CACHE_TTL  = 86400                                          # 24ч — маппинг меняется редко
 
 
@@ -110,6 +112,33 @@ def _cmc_pct_to_z(pct_change_24h: float) -> float:
     if pct_change_24h >= -20:  return 0.0
     if pct_change_24h >= -40:  return -1.0
     return -2.0
+
+
+async def _get_cc_volumes(base: str) -> Optional[list]:
+    """CryptoCompare fallback: возвращает список дневных объёмов (USD) за 14 дней или None."""
+    if not _CC_API_KEY:
+        return None
+    try:
+        import aiohttp
+        url = f"{_CC_BASE_URL}/data/v2/histoday"
+        headers = {"Authorization": f"Apikey {_CC_API_KEY}"}
+        params = {"fsym": base, "tsym": "USD", "limit": 14}
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.get(url, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        if data.get("Response") != "Success":
+            return None
+        days = data.get("Data", {}).get("Data", [])
+        if not days or len(days) < 5:
+            return None
+        # volumeto = объём в USD (покупки + продажи)
+        return [float(d.get("volumeto", 0)) for d in days if d.get("volumeto", 0) > 0]
+    except Exception as e:
+        logger.debug(f"[OnChain] CryptoCompare {base}: {e}")
+        return None
 
 
 async def _resolve_dynamic_id(symbol: str, redis_client=None) -> Optional[str]:
@@ -272,7 +301,24 @@ async def get_volume_z_score(
                 except Exception:
                     pass
             return z, desc
-        return 0.0, f"[OnChain] {symbol}: нет маппинга CoinGecko/CMC"
+        # CryptoCompare fallback (3-й) — даёт настоящий z-score из 14-дневной истории
+        cc_vols = await _get_cc_volumes(base)
+        if cc_vols:
+            z = round(_calc_z_score(cc_vols), 2)
+            if z > _Z_INFLOW_HIGH:
+                desc = f"📥 OnChain(CC): z={z:.1f} аномальный ПРИТОК → давление продаж"
+            elif z < _Z_OUTFLOW_LOW:
+                desc = f"📤 OnChain(CC): z={z:.1f} аномальный ОТТОК → накопление"
+            else:
+                desc = f"OnChain(CC): z={z:.1f} нейтрально"
+            logger.info(f"[OnChain] {symbol}: CryptoCompare fallback z={z:.2f}")
+            if redis_client:
+                try:
+                    redis_client.setex(cache_key, _REDIS_TTL, json.dumps({"z": z, "desc": desc}))
+                except Exception:
+                    pass
+            return z, desc
+        return 0.0, f"[OnChain] {symbol}: нет маппинга CoinGecko/CMC/CC"
 
     # Запрашиваем CoinGecko
     try:
@@ -398,7 +444,29 @@ async def get_active_addr_proxy(
                 except Exception:
                     pass
             return change_pct, desc
-        return 0.0, f"[AddrProxy] {symbol}: нет маппинга CoinGecko/CMC"
+        # CryptoCompare fallback (3-й) — 14 дней, считаем 7d vs 7d как в CoinGecko
+        cc_vols = await _get_cc_volumes(base)
+        if cc_vols and len(cc_vols) >= 14:
+            recent_7  = cc_vols[-7:]
+            prev_7    = cc_vols[-14:-7]
+            avg_recent = sum(recent_7) / len(recent_7)
+            avg_prev   = sum(prev_7) / len(prev_7)
+            if avg_prev > 0:
+                change_pct = round((avg_recent - avg_prev) / avg_prev * 100, 1)
+                if change_pct >= _ADDR_ANOMALY_PCT:
+                    desc = f"🟢 AddrProxy(CC): объём +{change_pct:.0f}% за 7д → рост активности"
+                elif change_pct <= -_ADDR_ANOMALY_PCT:
+                    desc = f"🔴 AddrProxy(CC): объём {change_pct:.0f}% за 7д → спад активности"
+                else:
+                    desc = f"AddrProxy(CC): {change_pct:+.0f}% нейтрально"
+                logger.info(f"[AddrProxy] {symbol}: CryptoCompare fallback {change_pct:+.1f}%")
+                if redis_client:
+                    try:
+                        redis_client.setex(cache_key, _REDIS_TTL, json.dumps({"pct": change_pct, "desc": desc}))
+                    except Exception:
+                        pass
+                return change_pct, desc
+        return 0.0, f"[AddrProxy] {symbol}: нет маппинга CoinGecko/CMC/CC"
 
     try:
         import aiohttp
