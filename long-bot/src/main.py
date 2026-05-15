@@ -1076,10 +1076,26 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
 
         # ── ATR-dynamic SL (M1) ──────────────────────────────────────────
         # ✅ v2.1: ATR-based SL вместо фиксированного %
-        # SL = entry - ATR × ATR_SL_MULT, с ограничением [ATR_SL_MIN%, ATR_SL_MAX%]
+        # SL порядок приоритетов: Swing SL → ATR SL → Fixed %
         entry_price = price
+
+        # ── #29 Swing High/Low SL (рыночная структура, приоритет 1) ─────────
+        _swing_sl_used = False
+        try:
+            from core.swing_sl import calculate_swing_sl
+            if ohlcv_4h and len(ohlcv_4h) >= 10:
+                _sw_sl, _sw_desc = calculate_swing_sl(ohlcv_4h, price, "long")
+                if _sw_sl is not None:
+                    stop_loss = _sw_sl
+                    _swing_sl_used = True
+                    if verbose:
+                        print(f"{log_prefix} 🎯 [SWING SL] {_sw_desc}")
+        except Exception as _sw_e:
+            pass
+
+        # ── ATR SL (приоритет 2, только если Swing SL не нашёл уровень) ──────
         _atr_sl_used = False
-        if Config.USE_ATR_SL and ohlcv_4h and len(ohlcv_4h) >= 14:
+        if not _swing_sl_used and Config.USE_ATR_SL and ohlcv_4h and len(ohlcv_4h) >= 14:
             try:
                 # Вычисляем ATR(14) по 4H свечам
                 _highs  = [c.high  for c in ohlcv_4h[-15:]]
@@ -1110,7 +1126,8 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 if verbose:
                     print(f"{log_prefix} ⚠️ [ATR SL] error: {_e} → fallback fixed %")
                 stop_loss = price * (1 - Config.SL_BUFFER / 100)
-        else:
+        elif not _swing_sl_used:
+            # Fallback fixed % только если ни Swing, ни ATR SL не сработали
             stop_loss = price * (1 - Config.SL_BUFFER / 100)
 
         # ── Momentum LONG detection (M2) ─────────────────────────────────
@@ -1130,6 +1147,24 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 if verbose:
                     print(f"{log_prefix} 🚀 [MOMENTUM] RSI={_m_rsi:.0f} Vol×{_m_vol:.1f} "
                           f"1H={_m_p1h:+.1f}% 4H={_m_p4h:+.1f}% → +{_mom_bonus} bonus")
+
+        # ── #33 Trend Following detector ─────────────────────────────────────
+        _trend_result = None
+        try:
+            from core.trend_detector import detect_trend
+            _trend_result = detect_trend(
+                candles_4h=ohlcv_4h,
+                price_change_1h=getattr(md, "price_change_1h", 0.0) or 0.0,
+                price_change_4h=getattr(md, "price_change_4h", 0.0) or 0.0,
+                volume_spike_ratio=getattr(md, "volume_spike_ratio", 1.0) or 1.0,
+                direction="long",
+            )
+            if _trend_result and _trend_result.has_trend:
+                base_score = min(100, base_score + _trend_result.score_bonus)
+                if verbose:
+                    print(f"{log_prefix} {_trend_result.description}")
+        except Exception as _tr_e:
+            pass
 
         # SMC Bullish refinement
         smc_data = {}
@@ -1166,7 +1201,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         _pat_is_trend   = _pat_name_base in Config.EXTENDED_TP_PATTERNS
         # P2: Flag/Pennant → extended TP
         _fp_extend_tp   = _fp_result is not None and getattr(_fp_result, 'extend_tp', False)
-        _use_ext_tp     = (_env_ext_long and _pat_is_trend) or _fp_extend_tp
+        # #33 Trend Following → extended TP
+        _trend_ext_tp   = _trend_result is not None and getattr(_trend_result, 'extend_tp', False)
+        _use_ext_tp     = (_env_ext_long and _pat_is_trend) or _fp_extend_tp or _trend_ext_tp
         _tp_count       = 6 if _use_ext_tp else 4
         _tp_weights     = Config.TP_WEIGHTS_6 if _use_ext_tp else Config.TP_WEIGHTS_4
         if _use_ext_tp and verbose:
