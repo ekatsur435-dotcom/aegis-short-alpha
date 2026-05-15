@@ -1138,22 +1138,64 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
 
         # ── ATR-dynamic SL (M1) ──────────────────────────────────────────
         # ✅ v2.1: ATR-based SL вместо фиксированного %
-        # SL порядок приоритетов: Swing SL → ATR SL → Fixed %
+        # SL порядок приоритетов: BOS/CHoCH → SSL/BSL → Swing → VP POC → ATR → Fixed %
         entry_price = price
 
-        # ── #29 Swing High/Low SL (рыночная структура, приоритет 1) ─────────
+        # ── #30 BOS/CHoCH SL (рыночная структура, приоритет 1) ──────────────
         _swing_sl_used = False
         try:
-            from core.swing_sl import calculate_swing_sl
-            if ohlcv_4h and len(ohlcv_4h) >= 10:
-                _sw_sl, _sw_desc = calculate_swing_sl(ohlcv_4h, price, "long")
-                if _sw_sl is not None:
-                    stop_loss = _sw_sl
+            from core.smc_detector import calculate_bos_choch_sl
+            if ohlcv_4h and len(ohlcv_4h) >= 20:
+                _bos_sl, _bos_desc = calculate_bos_choch_sl(ohlcv_4h, price, "long")
+                if _bos_sl is not None:
+                    stop_loss = _bos_sl
                     _swing_sl_used = True
                     if verbose:
-                        print(f"{log_prefix} 🎯 [SWING SL] {_sw_desc}")
-        except Exception as _sw_e:
+                        print(f"{log_prefix} 🎯 [BOS/CHoCH SL] {_bos_desc}")
+        except Exception:
             pass
+
+        # ── #32 SSL/BSL Liquidity SL (приоритет 2) ───────────────────────────
+        if not _swing_sl_used:
+            try:
+                from core.smc_detector import calculate_ssl_bsl_sl
+                if ohlcv_4h and len(ohlcv_4h) >= 15:
+                    _ssl_sl, _ssl_desc = calculate_ssl_bsl_sl(ohlcv_4h, price, "long")
+                    if _ssl_sl is not None:
+                        stop_loss = _ssl_sl
+                        _swing_sl_used = True
+                        if verbose:
+                            print(f"{log_prefix} 🎯 [SSL/BSL SL] {_ssl_desc}")
+            except Exception:
+                pass
+
+        # ── #29 Swing High/Low SL (приоритет 3) ──────────────────────────────
+        if not _swing_sl_used:
+            try:
+                from core.swing_sl import calculate_swing_sl
+                if ohlcv_4h and len(ohlcv_4h) >= 10:
+                    _sw_sl, _sw_desc = calculate_swing_sl(ohlcv_4h, price, "long")
+                    if _sw_sl is not None:
+                        stop_loss = _sw_sl
+                        _swing_sl_used = True
+                        if verbose:
+                            print(f"{log_prefix} 🎯 [SWING SL] {_sw_desc}")
+            except Exception:
+                pass
+
+        # ── #31 Volume Profile POC SL (приоритет 4) ──────────────────────────
+        if not _swing_sl_used:
+            try:
+                from core.volume_profile import calculate_poc_sl
+                if ohlcv_4h and len(ohlcv_4h) >= 20:
+                    _vp_sl, _vp_desc = calculate_poc_sl(ohlcv_4h, price, "long")
+                    if _vp_sl is not None:
+                        stop_loss = _vp_sl
+                        _swing_sl_used = True
+                        if verbose:
+                            print(f"{log_prefix} 🎯 {_vp_desc}")
+            except Exception:
+                pass
 
         # ── ATR SL (приоритет 2, только если Swing SL не нашёл уровень) ──────
         _atr_sl_used = False

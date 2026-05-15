@@ -1088,37 +1088,62 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             except Exception as _ml_e:
                 pass  # ML scorer не критичен
 
-        # SL порядок приоритетов: Swing SL → ATR SL → Fixed %
+        # SL порядок приоритетов: BOS/CHoCH → SSL/BSL → Swing → VP POC → ATR → Fixed %
         entry_price = price
 
-        # ── #29 Swing High/Low SL (рыночная структура, приоритет 1) ─────────
+        # ── #30 BOS/CHoCH SL (рыночная структура, приоритет 1) ──────────────
         _swing_sl_used = False
         try:
-            from core.swing_sl import calculate_swing_sl
-            if ohlcv_4h and len(ohlcv_4h) >= 10:
-                _sw_sl, _sw_desc = calculate_swing_sl(ohlcv_4h, price, "short")
-                if _sw_sl is not None:
-                    stop_loss = _sw_sl
+            from core.smc_detector import calculate_bos_choch_sl
+            if ohlcv_4h and len(ohlcv_4h) >= 20:
+                _bos_sl, _bos_desc = calculate_bos_choch_sl(ohlcv_4h, price, "short")
+                if _bos_sl is not None:
+                    stop_loss = _bos_sl
                     _swing_sl_used = True
                     if verbose:
-                        print(f"{log_prefix} 🎯 [SWING SL] {_sw_desc}")
-        except Exception as _sw_e:
+                        print(f"{log_prefix} 🎯 [BOS/CHoCH SL] {_bos_desc}")
+        except Exception as _bos_e:
             pass
 
-        # ── POC 4H Structural SL (приоритет 1.5 — после Swing, перед ATR) ─────
-        # SL ставится за POC 4H если он выше текущей цены (уровень макс. объёма = сопротивление)
+        # ── #32 SSL/BSL Liquidity SL (приоритет 2) ───────────────────────────
         if not _swing_sl_used:
             try:
-                _poc4h = getattr(getattr(md, 'market_structure', None), 'poc_4h', 0) or 0
-                if _poc4h > 0 and _poc4h > price:
-                    _poc_sl_pct = (_poc4h - price) / price * 100
-                    _sl_min = getattr(Config, 'ATR_SL_MIN', 1.5)
-                    _sl_max = getattr(Config, 'ATR_SL_MAX', 8.0)
-                    if _sl_min <= _poc_sl_pct <= _sl_max:
-                        stop_loss = _poc4h
+                from core.smc_detector import calculate_ssl_bsl_sl
+                if ohlcv_4h and len(ohlcv_4h) >= 15:
+                    _ssl_sl, _ssl_desc = calculate_ssl_bsl_sl(ohlcv_4h, price, "short")
+                    if _ssl_sl is not None:
+                        stop_loss = _ssl_sl
                         _swing_sl_used = True
                         if verbose:
-                            print(f"{log_prefix} 🏗 [POC SL] POC4H={_poc4h:.6f} → SL ({_poc_sl_pct:.2f}%) за уровень макс. объёма")
+                            print(f"{log_prefix} 🎯 [SSL/BSL SL] {_ssl_desc}")
+            except Exception:
+                pass
+
+        # ── #29 Swing High/Low SL (приоритет 3) ──────────────────────────────
+        if not _swing_sl_used:
+            try:
+                from core.swing_sl import calculate_swing_sl
+                if ohlcv_4h and len(ohlcv_4h) >= 10:
+                    _sw_sl, _sw_desc = calculate_swing_sl(ohlcv_4h, price, "short")
+                    if _sw_sl is not None:
+                        stop_loss = _sw_sl
+                        _swing_sl_used = True
+                        if verbose:
+                            print(f"{log_prefix} 🎯 [SWING SL] {_sw_desc}")
+            except Exception:
+                pass
+
+        # ── #31 Volume Profile POC SL (приоритет 4) ──────────────────────────
+        if not _swing_sl_used:
+            try:
+                from core.volume_profile import calculate_poc_sl
+                if ohlcv_4h and len(ohlcv_4h) >= 20:
+                    _vp_sl, _vp_desc = calculate_poc_sl(ohlcv_4h, price, "short")
+                    if _vp_sl is not None:
+                        stop_loss = _vp_sl
+                        _swing_sl_used = True
+                        if verbose:
+                            print(f"{log_prefix} 🎯 {_vp_desc}")
             except Exception:
                 pass
 
