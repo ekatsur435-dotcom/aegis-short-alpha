@@ -40,9 +40,9 @@ services:
           property: url
       # Config
       - key: MAX_PAIRS
-        value: "500"
+        value: "200"
       - key: MAX_WATCHLIST
-        value: "500"
+        value: "1000"
       - key: MIN_SHORT_SCORE
         value: "65"          # AEGIS final threshold
       - key: MIN_SHORT_BASE_SCORE
@@ -178,9 +178,9 @@ services:
           property: url
       # Config (LONG-specific)
       - key: MAX_PAIRS
-        value: "500"
+        value: "200"
       - key: MAX_WATCHLIST
-        value: "500"
+        value: "1000"
       - key: MIN_LONG_SCORE
         value: "72"           # AEGIS final threshold
       - key: MIN_LONG_BASE_SCORE
