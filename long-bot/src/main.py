@@ -591,12 +591,16 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
     """
     log_prefix = f"🟢 [{symbol}]"
     try:
-        # ✅ FIX: Проверяем оба уровня блэклиста
-        # Уровень 1: вечный Redis-блэклист (символ промахнулся 3+ раз)
-        if state.redis and state.redis.client.exists(f"blacklist:{symbol}"):
+        # ✅ OPT: in-memory sets (загружены в scan_market) — нет Redis-вызовов
+        _bl_set = getattr(state, '_blacklist_set', None)
+        _sk_set = getattr(state, '_skip_nodata_set', None)
+        if _bl_set is not None:
+            if symbol in _bl_set: return None
+        elif state.redis and state.redis.client.exists(f"blacklist:{symbol}"):
             return None
-        # Уровень 2: 24-часовой skip (временный промах)
-        if state.redis and state.redis.client.exists(f"skip:nodata:{symbol}"):
+        if _sk_set is not None:
+            if symbol in _sk_set: return None
+        elif state.redis and state.redis.client.exists(f"skip:nodata:{symbol}"):
             return None
 
         md = await state.binance.get_complete_market_data(symbol)
@@ -613,8 +617,12 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                         state.redis.client.set(f"blacklist:{symbol}", f"nodata:{count}")
                         state.redis.client.delete(count_key)
                         print(f"🚫 [{symbol}] Добавлен в постоянный блэклист ({count} промахов)")
+                        if hasattr(state, '_blacklist_set') and state._blacklist_set is not None:
+                            state._blacklist_set.add(symbol)
                     else:
                         state.redis.client.setex(f"skip:nodata:{symbol}", 86400, "1")
+                        if hasattr(state, '_skip_nodata_set') and state._skip_nodata_set is not None:
+                            state._skip_nodata_set.add(symbol)
             except Exception:
                 pass
             return None
@@ -1028,7 +1036,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             if verbose:
                 print(f"{log_prefix} 🎯 [CASCADE LONG] +{_cas.score_bonus}: {_cas.description[:80]}")
         # 🆕 Консолидация фильтр — блокировка входов в середине диапазона
-        if state.consolidation_detector and ohlcv_15m:
+        # Управляется ENV CONSOLIDATION_FILTER_ENABLED (по умолч. true)
+        _cons_filter_on = os.getenv("CONSOLIDATION_FILTER_ENABLED", "true").lower() == "true"
+        if _cons_filter_on and state.consolidation_detector and ohlcv_15m:
             cons = state.consolidation_detector.detect(ohlcv_15m, price)
             # ✅ FIX #4: передаём RSI 1H для исключения при экстремальной перепроданности
             rsi_1h_val = getattr(md, "rsi_1h", 50.0) or 50.0
@@ -1437,6 +1447,17 @@ async def scan_market():
             print(f"📊 [BTC_4H_FILTER] BTC 4H {_btc_cache_4h:+.1f}% — OK для LONG")
     # ✅ FIX #5: сохраняем в state для delta scorer
     state.btc_change_1h = _btc_cache_1h
+
+    # ✅ OPT: Batch-загрузка blacklist + skip:nodata в Python sets (2 Redis команды вместо ~1000)
+    try:
+        if state.redis:
+            _bl_keys = state.redis.client.keys("blacklist:*")
+            state._blacklist_set = {k.replace("blacklist:", "") for k in _bl_keys}
+            _sk_keys = state.redis.client.keys("skip:nodata:*")
+            state._skip_nodata_set = {k.replace("skip:nodata:", "") for k in _sk_keys}
+    except Exception:
+        state._blacklist_set = None
+        state._skip_nodata_set = None
 
     # ✅ OPT v18: Batch-загрузка тикеров
     try:

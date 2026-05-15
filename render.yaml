@@ -87,6 +87,16 @@ services:
         value: "true"
       - key: AUTO_TRADING_ENABLED
         value: "false"
+      - key: SKIP_NODATA_TTL
+        value: "3600"           # 1ч skip вместо 24ч — быстрее восстановление после ошибок
+      - key: ENABLE_MOMENTUM_SHORT
+        value: "true"
+      - key: MOMENTUM_RSI_MAX_SHORT
+        value: "48"
+      - key: MOMENTUM_VOL_MIN_SHORT
+        value: "1.3"
+      - key: MOMENTUM_DOWNTREND_1H
+        value: "-1.5"
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
@@ -179,3 +189,7 @@ services:
         value: "-3.0"
       - key: AUTO_TRADING_ENABLED
         value: "false"
+      - key: SKIP_NODATA_TTL
+        value: "3600"           # 1ч skip вместо 24ч
+      - key: CONSOLIDATION_FILTER_ENABLED
+        value: "true"           # false = отключить фильтр консолидации полностью

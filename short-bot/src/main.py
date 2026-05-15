@@ -552,12 +552,17 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
     """
     log_prefix = f"🔍 [{symbol}]"
     try:
-        # ✅ FIX: Проверяем оба уровня блэклиста
-        # Уровень 1: вечный Redis-блэклист (символ промахнулся 3+ раз)
-        if state.redis and state.redis.client.exists(f"blacklist:{symbol}"):
+        # ✅ OPT: Проверяем in-memory наборы (загружены в scan_market) — нет Redis-вызовов
+        # Fallback на Redis.exists если наборы не инициализированы (первый запуск)
+        _bl_set = getattr(state, '_blacklist_set', None)
+        _sk_set = getattr(state, '_skip_nodata_set', None)
+        if _bl_set is not None:
+            if symbol in _bl_set: return None
+        elif state.redis and state.redis.client.exists(f"blacklist:{symbol}"):
             return None
-        # Уровень 2: 24-часовой skip (временный промах)
-        if state.redis and state.redis.client.exists(f"skip:nodata:{symbol}"):
+        if _sk_set is not None:
+            if symbol in _sk_set: return None
+        elif state.redis and state.redis.client.exists(f"skip:nodata:{symbol}"):
             return None
 
         md = await state.binance.get_complete_market_data(symbol)
@@ -585,10 +590,16 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                         state.redis.client.set(f"blacklist:{symbol}", f"nodata:{count}")
                         state.redis.client.delete(count_key)
                         print(f"🚫 [{symbol}] Добавлен в постоянный блэклист ({count} промахов)")
+                        # Обновляем in-memory set
+                        if hasattr(state, '_blacklist_set') and state._blacklist_set is not None:
+                            state._blacklist_set.add(symbol)
                     else:
                         # skip TTL читается из ENV SKIP_NODATA_TTL (дефолт 86400 = 24ч)
                         _skip_ttl = int(os.getenv("SKIP_NODATA_TTL", "86400"))
                         state.redis.client.setex(f"skip:nodata:{symbol}", _skip_ttl, "1")
+                        # Обновляем in-memory set
+                        if hasattr(state, '_skip_nodata_set') and state._skip_nodata_set is not None:
+                            state._skip_nodata_set.add(symbol)
             except Exception:
                 pass
             return None
@@ -1352,6 +1363,18 @@ async def scan_market():
             _btc_cache_1h = _btc_md.price_change_1h
     except Exception:
         pass
+
+    # ✅ OPT: Batch-загрузка blacklist + skip:nodata в Python sets (2 Redis команды вместо ~1000)
+    # Экономия: 487 символов × 2 EXISTS = 974 команды → 2 keys() вызова на весь скан
+    try:
+        if state.redis:
+            _bl_keys = state.redis.client.keys("blacklist:*")
+            state._blacklist_set = {k.replace("blacklist:", "") for k in _bl_keys}
+            _sk_keys = state.redis.client.keys("skip:nodata:*")
+            state._skip_nodata_set = {k.replace("skip:nodata:", "") for k in _sk_keys}
+    except Exception:
+        state._blacklist_set = None
+        state._skip_nodata_set = None
 
     # ✅ OPT v18: Batch-загрузка ВСЕХ тикеров за 1 запрос (кэш 60s)
     # Без этого: 341 запрос × /v5/market/tickers → +30s на скан
