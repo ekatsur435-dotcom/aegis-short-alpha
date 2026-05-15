@@ -25,11 +25,14 @@ logger = logging.getLogger("aegis.signal_engine")
 
 # ✅ FIX: Z_VOLUME_GATE_MIN теперь читается из ENV (было хардкод 15)
 _Z_VOLUME_GATE_MIN      = int(float(os.getenv("Z_VOLUME_GATE_MIN_SHORT", os.getenv("Z_VOLUME_GATE_MIN", "15"))))
-# Momentum SHORT bypass — аналог LONG бота: при сильном даунтренде обходим z_volume gate
+# Momentum SHORT bypass — при сильном даунтренде обходим z_volume gate (RSI низкий + цена падает)
 _ENABLE_MOMENTUM_SHORT  = os.getenv("ENABLE_MOMENTUM_SHORT", "true").lower() == "true"
 _MOMENTUM_RSI_MAX_SHORT = float(os.getenv("MOMENTUM_RSI_MAX_SHORT", "48"))   # RSI ниже этого = падение
 _MOMENTUM_VOL_MIN_SHORT = float(os.getenv("MOMENTUM_VOL_MIN_SHORT", "1.3"))  # мин volume spike
 _MOMENTUM_DOWNTREND_1H  = float(os.getenv("MOMENTUM_DOWNTREND_1H",  "-1.5")) # мин падение 1H %
+# Overbought SHORT bypass — при перекупленности + Premium zone + медвежий паттерн (RSI высокий, нет резкого памп)
+_ENABLE_OVERBOUGHT_SHORT  = os.getenv("ENABLE_OVERBOUGHT_SHORT", "true").lower() == "true"
+_OVERBOUGHT_RSI_MIN_SHORT = float(os.getenv("OVERBOUGHT_RSI_MIN_SHORT", "63"))  # RSI выше = перекуплен
 
 
 class SignalStrength(Enum):
@@ -380,6 +383,29 @@ class AegisSignalEngine:
                     )
                     if _p24h < -15: final_score = min(final_score + 10, 100)
                     elif _p24h < -8: final_score = min(final_score + 5, 100)
+
+            # Overbought SHORT bypass: RSI высокий + цена растёт + медвежий паттерн
+            # Для случаев когда памп медленный (нет резкого volume spike, но перекуплено)
+            if not _momentum_bypass and _ENABLE_OVERBOUGHT_SHORT:
+                _rsi_ob  = getattr(market_data, "rsi_1h", 50)             or 50
+                _ls_ob   = getattr(market_data, "long_short_ratio", 50)   or 50
+                _trend   = getattr(market_data, "price_trend", "")        or ""
+                _pats    = getattr(market_data, "patterns", [])           or []
+                _BEARISH = {"MEGA_SHORT", "TRAP_LONG", "REJECTION_SHORT", "WYCKOFF_UPTHRUST"}
+                _has_bear = any(any(b in p for b in _BEARISH) for p in _pats)
+                if (_rsi_ob >= _OVERBOUGHT_RSI_MIN_SHORT
+                        and _ls_ob >= 55              # лонги доминируют
+                        and _trend == "up"            # цена на подъёме
+                        and _has_bear):               # есть медвежий паттерн
+                    _momentum_bypass = True
+                    all_reasons.append(
+                        f"OVERBOUGHT SHORT bypass: RSI={_rsi_ob:.0f} L/S={_ls_ob:.0f}% "
+                        f"trend=up patterns={[p for p in _pats if any(b in p for b in _BEARISH)][:2]}"
+                    )
+                    logger.info(
+                        f"[AEGIS OVERBOUGHT SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"→ Overbought bypass (RSI={_rsi_ob:.0f} L/S={_ls_ob:.0f}% pattern)"
+                    )
 
             if not _momentum_bypass:
                 logger.info(
