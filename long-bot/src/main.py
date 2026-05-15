@@ -1215,6 +1215,15 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 if verbose:
                     print(f"{log_prefix} ⚠️ [SMC] error: {e}")
 
+        # Hard minimum SL — абсолютный минимум от ВХОДА (entry_price)
+        # Предотвращает случаи когда Swing/SMC ставит SL слишком близко (как XNYUSDT 0.65%)
+        _hard_sl_min_pct = float(os.getenv("LONG_SL_HARD_MIN_PCT", "2.0"))
+        _sl_from_entry = (entry_price - stop_loss) / entry_price * 100 if entry_price > 0 else 0
+        if _sl_from_entry < _hard_sl_min_pct:
+            stop_loss = entry_price * (1 - _hard_sl_min_pct / 100)
+            if verbose:
+                print(f"{log_prefix} 🛡 [SL MIN] SL слишком близко ({_sl_from_entry:.2f}% < {_hard_sl_min_pct}%) → принудительно {_hard_sl_min_pct}%")
+
         sl_pct = round((price - stop_loss) / price * 100, 2)
         if sl_pct < Config.SL_BUFFER:
             stop_loss = price * (1 - Config.SL_BUFFER / 100)

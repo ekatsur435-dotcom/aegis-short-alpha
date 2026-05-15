@@ -36,8 +36,8 @@ _OVERBOUGHT_RSI_MIN_SHORT = float(os.getenv("OVERBOUGHT_RSI_MIN_SHORT", "63"))  
 # Bearish Continuation bypass — для плавных даунтрендов без volume spike (CETUS/AGI тип)
 _ENABLE_BEARISH_CONT_SHORT  = os.getenv("ENABLE_BEARISH_CONT_SHORT", "true").lower() == "true"
 _BEARISH_CONT_RSI_MIN       = float(os.getenv("BEARISH_CONT_RSI_MIN_SHORT", "30"))   # RSI выше этого (не на дне)
-_BEARISH_CONT_RSI_MAX       = float(os.getenv("BEARISH_CONT_RSI_MAX_SHORT", "55"))   # RSI ниже этого (не перекуплен)
-_BEARISH_CONT_BASE_MIN      = float(os.getenv("BEARISH_CONT_BASE_MIN_SHORT", "55"))  # минимальный BASE score
+_BEARISH_CONT_RSI_MAX       = float(os.getenv("BEARISH_CONT_RSI_MAX_SHORT", "60"))   # RSI ниже этого (RANGING даёт RSI~55)
+_BEARISH_CONT_BASE_MIN      = float(os.getenv("BEARISH_CONT_BASE_MIN_SHORT", "50"))  # минимальный BASE score
 
 
 class SignalStrength(Enum):
@@ -418,7 +418,8 @@ class AegisSignalEngine:
                 _p4h_bc  = getattr(market_data, "price_change_4h", 0)   or 0
                 _p24h_bc = getattr(market_data, "price_change_24h", 0)  or 0
                 _htf_bc  = getattr(market_data, "htf_structure", "")    or ""
-                _htf_is_bear_bc = "bear" in _htf_bc.lower()
+                # RANGING = нейтральный HTF, тоже допускает bearish cont (цена может идти в любую сторону)
+                _htf_is_bear_bc = "bear" in _htf_bc.lower() or "ranging" in _htf_bc.lower()
                 if (_BEARISH_CONT_RSI_MIN <= _rsi_bc <= _BEARISH_CONT_RSI_MAX
                         and (_p4h_bc < -3.0 or _p24h_bc < -8.0)
                         and _htf_is_bear_bc

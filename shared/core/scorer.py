@@ -262,10 +262,10 @@ class BaseScorer:
         if direction == "short":
             if "BEARISH" in htf:    score += 8; parts.append(f"HTF BEARISH ✅ по тренду")
             elif "RANGING" in htf:  score += 3; parts.append(f"HTF RANGING нейтраль")
-            elif "BULLISH" in htf:  score -= 8; parts.append(f"HTF BULLISH ⚠️ против тренда -8")
+            elif "BULLISH" in htf:  score -= 4; parts.append(f"HTF BULLISH ⚠️ против тренда -4")
             else:                   parts.append(f"HTF={htf_structure or 'неизвестно'}")
             if "PREMIUM" in z:      score += 5; parts.append(f"Zone PREMIUM ✅ шорт из хаёв")
-            elif "DISCOUNT" in z:   score -= 4; parts.append(f"Zone DISCOUNT ⚠️ шорт из лоёв -4")
+            elif "DISCOUNT" in z:   score -= 2; parts.append(f"Zone DISCOUNT ⚠️ шорт из лоёв -2")
             else:                   score += 1; parts.append(f"Zone {z or 'neutral'}")
         else:  # long
             if "BULLISH" in htf:    score += 8; parts.append(f"HTF BULLISH ✅ по тренду")

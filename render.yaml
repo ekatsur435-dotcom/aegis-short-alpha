@@ -161,6 +161,12 @@ services:
         value: "15"
       - key: LONG_SL_BUFFER
         value: "3.0"
+      - key: SWING_SL_MIN_PCT
+        value: "2.0"             # Swing SL не ближе 2% от входа (было 1.0 — слишком тесно)
+      - key: ATR_SL_MIN_PCT
+        value: "2.0"             # ATR SL не ближе 2% от входа (было 1.0)
+      - key: LONG_SL_HARD_MIN_PCT
+        value: "2.0"             # Абсолютный минимум SL от входа — защита от tight SL
       - key: LONG_LEVERAGE
         value: "5-20"
       - key: MIN_VOLUME_USDT
