@@ -121,7 +121,7 @@ class MarketData:
     oi_change_30m:        float = 0.0
     oi_change_1h:         float = 0.0
     oi_change_4h:         float = 0.0
-    # oi_change_4d остаётся для совместимости, НЕ используется в скоре
+    # oi_change_4d используется в OIAnalyzerLong.analyze() (oi_4d секция)
     # >0.6 = агрессивные покупки (бычье давление), <0.4 = агрессивные продажи
     taker_buy_sell_ratio: Optional[float] = None
 
