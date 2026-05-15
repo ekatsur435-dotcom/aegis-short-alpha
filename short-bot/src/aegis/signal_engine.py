@@ -429,6 +429,9 @@ class AegisSignalEngine:
                 _htf_bc  = getattr(market_data, "htf_structure", "")    or ""
                 # RANGING = нейтральный HTF, тоже допускает bearish cont (цена может идти в любую сторону)
                 _htf_is_bear_bc = "bear" in _htf_bc.lower() or "ranging" in _htf_bc.lower()
+                # Fix #2: если htf_structure пустая (BingX offline) но цена явно падает — treat as ranging
+                if not _htf_is_bear_bc and not _htf_bc and _p4h_bc < -3.0:
+                    _htf_is_bear_bc = True
                 if (_BEARISH_CONT_RSI_MIN <= _rsi_bc <= _BEARISH_CONT_RSI_MAX
                         and (_p4h_bc < -3.0 or _p24h_bc < -8.0)
                         and _htf_is_bear_bc

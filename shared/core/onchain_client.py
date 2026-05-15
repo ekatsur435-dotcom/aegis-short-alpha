@@ -43,6 +43,7 @@ def _cg_headers() -> dict:
 
 # Маппинг Binance symbol → CoinGecko id
 _SYMBOL_MAP: Dict[str, str] = {
+    # ── Топ L1/L2 ────────────────────────────────────────────────────────────
     "BTCUSDT": "bitcoin", "ETHUSDT": "ethereum", "BNBUSDT": "binancecoin",
     "SOLUSDT": "solana", "XRPUSDT": "ripple", "DOGEUSDT": "dogecoin",
     "ADAUSDT": "cardano", "AVAXUSDT": "avalanche-2", "DOTUSDT": "polkadot",
@@ -56,6 +57,56 @@ _SYMBOL_MAP: Dict[str, str] = {
     "GRTUSDT": "the-graph", "COMPUSDT": "compound-governance-token",
     "RUNEUSDT": "thorchain", "ORDIUSDT": "ordinals", "STXUSDT": "blockstack",
     "WLDUSDT": "worldcoin-wld", "TIAUSDT": "celestia", "SEIUSDT": "sei-network",
+    # ── Дополнительные L1/L2 ─────────────────────────────────────────────────
+    "TRXUSDT": "tron", "XLMUSDT": "stellar", "XMRUSDT": "monero",
+    "ETCUSDT": "ethereum-classic", "VETUSDT": "vechain", "FILUSDT": "filecoin",
+    "ICPUSDT": "internet-computer", "HBARUSDT": "hedera-hashgraph",
+    "THETAUSDT": "theta-token", "EOSUSDT": "eos", "XTZUSDT": "tezos",
+    "FLOWUSDT": "flow", "ALGOUSDT": "algorand", "ZILUSDT": "zilliqa",
+    "WAVESUSDT": "waves", "ZRXUSDT": "0x", "KAVAUSDT": "kava",
+    "ONTUSDT": "ontology", "BANDUSDT": "band-protocol",
+    "KLAYUSDT": "klay-token", "ONEUSDT": "harmony", "DGBUSDT": "digibyte",
+    "MINAUSDT": "mina-protocol", "EGLDUSDT": "elrond-erd-2",
+    "CFXUSDT": "conflux-token", "METISUSDT": "metis-token",
+    "GLMRUSDT": "moonbeam", "MOVRUSDT": "moonriver",
+    # ── DeFi ─────────────────────────────────────────────────────────────────
+    "CRVUSDT": "curve-dao-token", "SNXUSDT": "havven", "YFIUSDT": "yearn-finance",
+    "BALUSDT": "balancer", "SUSHIUSDT": "sushi", "PERPUSDT": "perpetual-protocol",
+    "DYDXUSDT": "dydx", "GMXUSDT": "gmx", "PENDLEUSDT": "pendle",
+    "STGUSDT": "stargate-finance", "UMAUSDT": "uma", "LRCUSDT": "loopring",
+    "WOOUSDT": "woo-network", "RAYDIUMUSDT": "raydium", "ORCAUSDT": "orca",
+    "JUPUSDT": "jupiter-exchange-solana", "CAKEUSDT": "pancakeswap-token",
+    "COTIUSDT": "coti", "COWUSDT": "cow-protocol",
+    # ── AI / инфраструктура ───────────────────────────────────────────────────
+    "FETUSDT": "fetch-ai", "AGIXUSDT": "singularitynet", "RENDERUSDT": "render-token",
+    "AIOZUSDT": "aioz-network", "ARUSDT": "arweave", "STORJUSDT": "storj",
+    "ENSUSDT": "ethereum-name-service", "QNTUSDT": "quant-network",
+    "EIGENUSDT": "eigenlayer", "PYTHUSDT": "pyth-network",
+    # ── Gaming / NFT / Метавёрс ───────────────────────────────────────────────
+    "CHZUSDT": "chiliz", "AUDIOUSDT": "audius", "ALICEUSDT": "my-neighbor-alice",
+    "VOXELUSDT": "voxies", "TLMUSDT": "alien-worlds", "HOOKUSDT": "hooked-protocol",
+    "GALUSDT": "project-galaxy", "CYBERUSDT": "cyberconnect",
+    # ── Layer2 / Bridge / Staking ─────────────────────────────────────────────
+    "NTRNUSDT": "neutron-3", "MNTUSDT": "mantle", "ALTUSDT": "altlayer",
+    "ZETAUSDT": "zetachain", "SKLUSDT": "skale", "ANKRUSDT": "ankr",
+    "APEUSDT": "apecoin", "BATUSDT": "basic-attention-token",
+    "BLURUSDT": "blur", "MASKUSDT": "mask-network",
+    "ENAUSDT": "ethena", "ONDOUSDT": "ondo-finance",
+    "TONUSDT": "the-open-network", "NOTUSDT": "notcoin",
+    # ── Meme ─────────────────────────────────────────────────────────────────
+    "1000SHIBUSDT": "shiba-inu", "1000PEPEUSDT": "pepe", "1000BONKUSDT": "bonk",
+    "1000TURBOUSDT": "turbo",
+    # ── Exchange tokens / CEX ─────────────────────────────────────────────────
+    "CROUSDT": "crypto-com-chain",
+    # ── Misc top-300 ─────────────────────────────────────────────────────────
+    "FLRUSDT": "flare-networks", "BLASTUSDT": "blast",
+    "SCUSDT": "siacoin", "CTCUSDT": "creditcoin-2",
+    "ASTRUSDT": "astar", "JASMYUSDT": "jasmy", "IOTXUSDT": "iotex",
+    "HOTUSDT": "holotoken", "TRBUSDT": "tellor", "NMRUSDT": "numeraire",
+    "PEOPLEUSDT": "constitutiondao", "RSRUSDT": "reserve-rights-token",
+    "LPTUSDT": "livepeer", "IDUSDT": "space-id", "SPELLUSDT": "spell-token",
+    "IOSTUSDT": "iostoken", "DASHUSDT": "dash", "NKNUSDT": "nkn",
+    "ARKMUSDT": "arkham", "ARPAUSDT": "arpa",
 }
 
 

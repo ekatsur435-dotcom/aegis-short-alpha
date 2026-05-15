@@ -759,6 +759,25 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     _ob_score, _ob_desc, _ = calculate_orderbook_score(_ob_data, md.price, "short")
                     if verbose and _ob_desc:
                         print(f"{log_prefix} {_ob_desc}")
+                else:
+                    # Fix #1: BingX 109418 (offline) → постоянный блэклист
+                    #         BingX 109425 (not exist) → skip 7 дней
+                    _bingx_err = getattr(state.auto_trader.bingx, 'last_error_code', None)
+                    if _bingx_err in (109418, 109425):
+                        try:
+                            if state.redis:
+                                if _bingx_err == 109418:
+                                    state.redis.client.set(f"blacklist:{symbol}", f"bingx:offline:{_bingx_err}")
+                                    if hasattr(state, '_blacklist_set') and state._blacklist_set is not None:
+                                        state._blacklist_set.add(symbol)
+                                    print(f"🚫 [{symbol}] BingX 109418 offline → постоянный блэклист")
+                                else:
+                                    state.redis.client.setex(f"skip:nodata:{symbol}", 86400 * 7, f"bingx:notexist:{_bingx_err}")
+                                    if hasattr(state, '_skip_nodata_set') and state._skip_nodata_set is not None:
+                                        state._skip_nodata_set.add(symbol)
+                                    print(f"⏭ [{symbol}] BingX 109425 not exist → skip 7д")
+                        except Exception:
+                            pass
         except Exception as _ob_err:
             pass  # не критично
 
