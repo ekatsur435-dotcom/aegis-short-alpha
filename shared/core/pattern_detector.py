@@ -334,12 +334,12 @@ class LongPatternDetector:
     # ── КЛАССИЧЕСКИЕ ПАТТЕРНЫ ─────────────────────────────────────────────────
 
     def detect_mega_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
-        if len(candles) < 20:
+        if len(candles) < 21:
             return None
         rsi = getattr(md, "rsi_1h", None) if md else None
         if rsi and rsi > 45:
             return None
-        last       = candles[-1]
+        last       = candles[-2]  # закрытая свеча — стабильный сигнал
         body       = _body(last)
         lower_wick = min(last.open, last.close) - last.low
         if lower_wick < body * 1.5:
@@ -368,9 +368,9 @@ class LongPatternDetector:
         )
 
     def detect_rejection_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
-        if len(candles) < 10:
+        if len(candles) < 11:
             return None
-        last       = candles[-1]
+        last       = candles[-2]  # закрытая свеча — стабильный сигнал
         lower_wick = min(last.open, last.close) - last.low
         body       = _body(last)
         if lower_wick < body * 1.0 or last.close < last.open:
@@ -663,9 +663,9 @@ class ShortPatternDetector:
     # ── КЛАССИЧЕСКИЕ ПАТТЕРНЫ ─────────────────────────────────────────────────
 
     def detect_mega_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
-        if len(candles) < 20:
+        if len(candles) < 21:
             return None
-        last       = candles[-1]
+        last       = candles[-2]  # закрытая свеча — стабильный сигнал
         upper_wick = last.high - max(last.open, last.close)
         body       = _body(last)
         if upper_wick < body * 1.5:
@@ -690,9 +690,9 @@ class ShortPatternDetector:
         )
 
     def detect_rejection_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
-        if len(candles) < 10:
+        if len(candles) < 11:
             return None
-        last       = candles[-1]
+        last       = candles[-2]  # закрытая свеча — стабильный сигнал
         upper_wick = last.high - max(last.open, last.close)
         body       = _body(last)
         if upper_wick < body * 1.0 or last.close > last.open:
