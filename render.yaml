@@ -111,6 +111,8 @@ services:
         value: "55"             # RSI ниже этого — не перекуплен
       - key: BEARISH_CONT_BASE_MIN_SHORT
         value: "55"             # Минимальный BASE score для активации bypass
+      - key: FUNDING_EXTREME_SHORT
+        value: "0.05"           # ≥0.05%→score60, ≥0.10%→75, ≥0.15%→90 в AEGIS + BASE +10
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
@@ -215,3 +217,5 @@ services:
         value: "3600"           # 1ч skip вместо 24ч
       - key: CONSOLIDATION_FILTER_ENABLED
         value: "true"           # false = отключить фильтр консолидации полностью
+      - key: FUNDING_EXTREME_LONG
+        value: "-0.05"          # ≤-0.05%→score60, ≤-0.10%→75, ≤-0.15%→90 в AEGIS + BASE +10

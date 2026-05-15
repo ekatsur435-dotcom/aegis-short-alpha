@@ -34,6 +34,8 @@ _Z_VOLUME_GATE_MIN    = int(float(os.getenv("Z_VOLUME_GATE_MIN", "8")))      # �
 _ENABLE_MOMENTUM_LONG = os.getenv("ENABLE_MOMENTUM_LONG", "true").lower() == "true"
 _MOMENTUM_RSI_MIN     = float(os.getenv("MOMENTUM_RSI_MIN", "58"))           # RSI мин для momentum
 _MOMENTUM_VOL_MIN     = float(os.getenv("MOMENTUM_VOL_MIN", "1.8"))          # Volume spike мин
+# Extreme funding — когда шорты переплачивают критически → LONG (short squeeze сигнал)
+_FUNDING_EXTREME_LONG = float(os.getenv("FUNDING_EXTREME_LONG", "-0.05"))   # % за 8ч (отрицательное значение)
 
 
 class SignalStrengthLong(Enum):
@@ -219,13 +221,20 @@ class AegisLongSignalEngine:
             f   = getattr(md, "funding_rate", 0) or 0
             acc = getattr(md, "funding_accumulated", 0) or 0
 
-            if   f < -0.15:  score += 55; reasons.append(f"FUNDING SPIKE {f:.3f}% — шорты сильно переплачивают 🟢")
-            elif f < -0.10:  score += 45; reasons.append(f"Funding низкий {f:.3f}%")
-            elif f < -0.05:  score += 35; reasons.append(f"Funding отрицательный {f:.3f}%")
-            elif f < -0.02:  score += 20; reasons.append(f"Funding умеренно отрицательный {f:.3f}%")
-            elif f < -0.005: score += 10; reasons.append(f"Funding слабо отрицательный {f:.3f}%")
-            elif f > 0.05:   score -= 15; reasons.append(f"Funding позитивный +{f:.3f}% (лонги платят — против)")
-            elif f > 0.02:   score -= 8;  reasons.append(f"Funding +{f:.3f}% (умеренно против)")
+            # Экстремальный отрицательный фандинг — шорты переплачивают критически → LONG (short squeeze)
+            if f <= _FUNDING_EXTREME_LONG * 3:   # < -0.15% дефолт
+                score = 90; reasons.append(f"🔥 FUNDING EXTREME {f:.3f}% — шорты сгорают, short squeeze!")
+                logger.info(f"[FUNDING EXTREME LONG] {symbol}: funding={f:.4f}% <= {_FUNDING_EXTREME_LONG * 3:.4f}% → score=90")
+            elif f <= _FUNDING_EXTREME_LONG * 2:  # < -0.10%
+                score = 75; reasons.append(f"🟢 FUNDING HIGH {f:.3f}% — шорты сильно переплачивают")
+                logger.info(f"[FUNDING HIGH LONG] {symbol}: funding={f:.4f}% <= {_FUNDING_EXTREME_LONG * 2:.4f}% → score=75")
+            elif f <= _FUNDING_EXTREME_LONG:      # < -0.05%
+                score = 60; reasons.append(f"Funding экстремальный {f:.3f}% — шорты переплачивают")
+                logger.info(f"[FUNDING ELEVATED LONG] {symbol}: funding={f:.4f}% <= {_FUNDING_EXTREME_LONG:.4f}% → score=60")
+            elif f < -0.02:  score = 20; reasons.append(f"Funding умеренно отрицательный {f:.3f}%")
+            elif f < -0.005: score = 10; reasons.append(f"Funding слабо отрицательный {f:.3f}%")
+            elif f > 0.05:   score  = 0; reasons.append(f"Funding позитивный +{f:.3f}% (лонги платят — против)")
+            elif f > 0.02:   score  = 5; reasons.append(f"Funding +{f:.3f}% (умеренно против)")
             else:            score  = 15; reasons.append(f"Funding нейтральный {f:.3f}%")
 
             if   acc < -0.5: score = min(score + 25, 100); reasons.append(f"Накопл. фандинг {acc:.2f}%/4д 🟢")
