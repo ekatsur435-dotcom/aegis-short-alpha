@@ -152,9 +152,11 @@ services:
       - key: MAX_WATCHLIST
         value: "500"
       - key: MIN_LONG_SCORE
-        value: "70"           # AEGIS final threshold
+        value: "72"           # AEGIS final threshold (было 70 → 72: режем маргинальные сигналы)
       - key: MIN_LONG_BASE_SCORE
-        value: "45"           # BASE_SCORER порог (мягче — ищет перепроданность)
+        value: "50"           # BASE_SCORER порог (было 45 → 50: тверже фильтрует не-дно)
+      - key: AEGIS_LONG_MIN_SCORE
+        value: "65"           # AEGIS engine внутренний порог (было 52-дефолт → 65: требует реального подтверждения dump exhaustion)
       - key: SCAN_INTERVAL
         value: "180"          # Long чуть медленнее short
       - key: MAX_POSITIONS
@@ -206,7 +208,7 @@ services:
       - key: ENABLE_BTC_FILTER
         value: "true"
       - key: BTC_BLOCK_THRESHOLD
-        value: "-3.0"
+        value: "-2.0"         # было -3.0 → -2.0: блокируем лонги при умеренном падении BTC
       - key: AUTO_TRADING_ENABLED
         value: "false"
       - key: SKIP_NODATA_TTL
