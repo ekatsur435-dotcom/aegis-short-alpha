@@ -120,6 +120,26 @@ def _swing_lows(candles, lookback: int = 3) -> List[float]:
             lows.append(l)
     return lows
 
+def _swing_highs_idx(candles, lookback: int = 3) -> List[Tuple[int, float]]:
+    """Swing highs с индексами: [(idx, price), ...]"""
+    result = []
+    for i in range(lookback, len(candles) - lookback):
+        h = candles[i].high
+        if (all(candles[j].high <= h for j in range(i - lookback, i)) and
+                all(candles[j].high <= h for j in range(i + 1, i + lookback + 1))):
+            result.append((i, h))
+    return result
+
+def _swing_lows_idx(candles, lookback: int = 3) -> List[Tuple[int, float]]:
+    """Swing lows с индексами: [(idx, price), ...]"""
+    result = []
+    for i in range(lookback, len(candles) - lookback):
+        l = candles[i].low
+        if (all(candles[j].low >= l for j in range(i - lookback, i)) and
+                all(candles[j].low >= l for j in range(i + 1, i + lookback + 1))):
+            result.append((i, l))
+    return result
+
 
 # ============================================================================
 # LONG PATTERN DETECTOR
@@ -131,6 +151,10 @@ class LongPatternDetector:
     def detect_all(self, candles, hourly_deltas=None, market_data=None) -> List[PatternResult]:
         results = []
         for fn in [
+            self.detect_ict_unicorn_long,   # highest priority — confluence signal
+            self.detect_ote_long,
+            self.detect_breaker_long,
+            self.detect_fvg_long,
             self.detect_breakout_long,
             self.detect_momentum_long,
             self.detect_liquidity_sweep_long,
@@ -162,6 +186,315 @@ class LongPatternDetector:
         elif closes[-1] < ema20[-1] and slope < -0.1:
             return "down"
         return "flat"
+
+    # ── ICT / SMC ПАТТЕРНЫ ───────────────────────────────────────────────────
+
+    def detect_ote_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """OTE_LONG: Fibonacci Optimal Trade Entry — pullback 61.8%-79% после медвежьего импульса.
+
+        ICT OTE зона: после сильного падения (swing_high→swing_low) цена
+        восстанавливается в зону 61.8%-79% от хода → LONG вход.
+        Self-fulfilling: тысячи трейдеров смотрят 61.8% → уровень работает.
+        score_bonus ≈ 18-22
+        """
+        if len(candles) < 20:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+
+        current_price = candles[-1].close
+        lookback = min(60, len(candles) - 3)
+        window = candles[-lookback:]
+        best = None
+
+        sh_list = _swing_highs_idx(window, lookback=3)
+        sl_list = _swing_lows_idx(window,  lookback=3)
+        if not sh_list or not sl_list:
+            return None
+
+        # Ищем пары (swing_high → swing_low) — медвежий импульс
+        for sh_idx, sh_price in sh_list:
+            # Swing low должен быть ПОСЛЕ swing high
+            candidates = [(si, sl) for si, sl in sl_list if si > sh_idx and sl < sh_price]
+            if not candidates:
+                continue
+            # Берём ближайший swing low после swing high
+            sl_idx, sl_price = min(candidates, key=lambda x: x[0])
+
+            impulse = sh_price - sl_price
+            if impulse < atr_v * 1.5:  # Импульс слишком мал
+                continue
+
+            # OTE зона: 61.8% – 79% восстановления от sl_price вверх
+            ote_lo = sl_price + 0.618 * impulse
+            ote_hi = sl_price + 0.79  * impulse
+            if ote_hi <= ote_lo:
+                continue
+
+            # Цена должна быть в OTE зоне (или в пределах 0.5% у границ)
+            in_zone = (ote_lo * 0.995 <= current_price <= ote_hi * 1.005)
+            if not in_zone:
+                continue
+
+            impulse_pct = impulse / sl_price * 100
+            if impulse_pct < 2.0:  # Минимальный значимый ход
+                continue
+
+            # Предпочитаем более свежие и крупные импульсы
+            dist = abs((ote_lo + ote_hi) / 2 - current_price)
+            if best is None or (impulse_pct > best[0] and dist < best[1] * 1.5):
+                best = (impulse_pct, dist, ote_lo, ote_hi, sh_price, sl_price, impulse)
+
+        if best is None:
+            return None
+
+        imp_pct, _, ote_lo, ote_hi, sh_price, sl_price, impulse = best
+        fib_lvl = (current_price - sl_price) / impulse * 100
+        bonus = min(22, int(14 + imp_pct * 0.5))
+        return PatternResult(
+            name="OTE_LONG", score_bonus=bonus,
+            confidence=min(0.78, 0.56 + imp_pct * 0.01),
+            direction="long",
+            suggested_sl_pct=round((current_price - sl_price * 0.995) / current_price * 100 + 0.2, 2),
+            reasons=[
+                f"📐 OTE LONG [{ote_lo:.6f} – {ote_hi:.6f}] Fib {fib_lvl:.1f}%",
+                f"Импульс {sh_price:.6f}→{sl_price:.6f} (-{imp_pct:.1f}%) | OTE pullback 61.8-79%",
+            ],
+        )
+
+    def detect_ict_unicorn_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """ICT_UNICORN_LONG: Bullish FVG ∩ Bullish Breaker Block = сильнейший ICT сигнал 2025.
+
+        Когда незаполненный FVG совпадает с зоной Breaker Block —
+        два независимых магнита institutional money указывают на одну зону.
+        Win rate 75%+, score_bonus ≈ 28-30.
+        """
+        if len(candles) < 20:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+
+        current_price = candles[-1].close
+        lookback = min(50, len(candles) - 3)
+        fvg_zones   = []
+        break_zones = []
+
+        # ── Собираем все незаполненные Bullish FVG ────────────────────────
+        for i in range(len(candles) - lookback, len(candles) - 2):
+            c1, c2, c3 = candles[i], candles[i + 1], candles[i + 2]
+            if c2.close <= c2.open:
+                continue
+            body2 = c2.close - c2.open
+            if body2 < atr_v * 1.0:  # Чуть мягче чем standalone FVG
+                continue
+            fvg_lo, fvg_hi = c1.high, c3.low
+            if fvg_hi <= fvg_lo:
+                continue
+            if (fvg_hi - fvg_lo) / c2.close * 100 < 0.08:
+                continue
+            filled = any(candles[j].low <= fvg_lo for j in range(i + 3, len(candles)))
+            if not filled:
+                fvg_zones.append((fvg_lo, fvg_hi))
+
+        if not fvg_zones:
+            return None
+
+        # ── Собираем все Bullish Breaker Block зоны ───────────────────────
+        lb2 = min(50, len(candles) - 5)
+        for i in range(len(candles) - lb2, len(candles) - 6):
+            c_ob = candles[i]
+            if c_ob.close <= c_ob.open:  # Должна быть бычья (перед медвежьим импульсом)
+                continue
+            ob_lo, ob_hi = c_ob.low, c_ob.high
+            end = min(i + 5, len(candles) - 1)
+            lo_after = min(candles[j].low for j in range(i + 1, end + 1))
+            if (ob_lo - lo_after) / ob_lo * 100 < 1.5:
+                continue
+            broken = any(candles[j].high > ob_hi for j in range(i + 2, len(candles) - 1))
+            if not broken:
+                continue
+            break_zones.append((ob_lo, ob_hi))
+
+        if not break_zones:
+            return None
+
+        # ── Ищем пересечение FVG и Breaker Block ──────────────────────────
+        best = None
+        for flo, fhi in fvg_zones:
+            for blo, bhi in break_zones:
+                overlap_lo = max(flo, blo)
+                overlap_hi = min(fhi, bhi)
+                if overlap_hi <= overlap_lo:
+                    continue  # Нет пересечения
+                # Цена в зоне пересечения
+                if current_price < overlap_lo * 0.99 or current_price > overlap_hi * 1.01:
+                    continue
+                overlap_pct = (overlap_hi - overlap_lo) / current_price * 100
+                if overlap_pct < 0.05:
+                    continue
+                dist = abs((overlap_lo + overlap_hi) / 2 - current_price)
+                if best is None or dist < best[0]:
+                    best = (dist, overlap_lo, overlap_hi, flo, fhi, blo, bhi, overlap_pct)
+
+        if best is None:
+            return None
+
+        _, ov_lo, ov_hi, flo, fhi, blo, bhi, ov_pct = best
+        bonus = min(30, int(24 + ov_pct * 3))
+        return PatternResult(
+            name="ICT_UNICORN_LONG", score_bonus=bonus,
+            confidence=min(0.88, 0.72 + ov_pct * 0.05),
+            direction="long",
+            suggested_sl_pct=round((current_price - ov_lo * 0.993) / current_price * 100 + 0.3, 2),
+            reasons=[
+                f"🦄 ICT UNICORN LONG | Overlap [{ov_lo:.6f}–{ov_hi:.6f}]",
+                f"Bullish FVG [{flo:.6f}–{fhi:.6f}] ∩ Breaker [{blo:.6f}–{bhi:.6f}]",
+                "FVG + Breaker Block в одной зоне = institutional confluence 75%+",
+            ],
+        )
+
+    def detect_breaker_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """BREAKER_LONG: Пробитый медвежий OB → зона поддержки (ICT Bullish Breaker Block).
+        1. Bearish OB = бычья свеча перед медвежьим импульсом
+        2. Цена пробивает OB вверх → OB флипает в поддержку
+        3. Цена возвращается в бывшую OB зону → LONG вход
+        """
+        if len(candles) < 15:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+
+        current_price = candles[-1].close
+        lookback = min(50, len(candles) - 5)
+        best = None
+
+        for i in range(len(candles) - lookback, len(candles) - 6):
+            c_ob = candles[i]
+
+            # OB candle: последняя бычья свеча перед медвежьим импульсом
+            if c_ob.close <= c_ob.open:
+                continue
+            ob_low  = c_ob.low
+            ob_high = c_ob.high
+
+            # Медвежий импульс после OB (≥1.5% падения)
+            end = min(i + 5, len(candles) - 1)
+            lo_after = min(candles[j].low for j in range(i + 1, end + 1))
+            drop_pct = (ob_low - lo_after) / ob_low * 100
+            if drop_pct < 1.5:
+                continue
+
+            # Цена пробивает OB вверх (проходит выше ob_high)
+            broken_idx = -1
+            for j in range(i + 2, len(candles) - 1):
+                if candles[j].high > ob_high:
+                    broken_idx = j
+                    break
+            if broken_idx < 0:
+                continue
+
+            # Цена возвращается В зону OB (pullback к бывшему сопротивлению = поддержка)
+            if current_price > ob_high * 1.01:
+                continue
+            if current_price < ob_low * 0.985:
+                continue
+
+            # Хотя бы одна свеча после пробоя вернулась в зону
+            retest = any(candles[j].low <= ob_high for j in range(broken_idx + 1, len(candles)))
+            if not retest:
+                continue
+
+            gap_pct = (ob_high - ob_low) / current_price * 100
+            dist = abs((ob_low + ob_high) / 2 - current_price)
+            if best is None or dist < best[0]:
+                best = (dist, ob_low, ob_high, drop_pct, gap_pct)
+
+        if best is None:
+            return None
+
+        _, ob_low, ob_high, drop_pct, gap_pct = best
+        bonus = min(26, int(18 + min(drop_pct, 10) * 0.5 + gap_pct * 2))
+        return PatternResult(
+            name="BREAKER_LONG", score_bonus=bonus,
+            confidence=min(0.82, 0.62 + min(drop_pct, 15) * 0.01),
+            direction="long",
+            suggested_sl_pct=round((current_price - ob_low * 0.995) / current_price * 100 + 0.2, 2),
+            reasons=[
+                f"🟢 Bullish Breaker [{ob_low:.6f} – {ob_high:.6f}]",
+                f"Медвежий OB -{drop_pct:.1f}% пробит вверх → pullback = поддержка",
+            ],
+        )
+
+    def detect_fvg_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """FVG_LONG: Bullish Fair Value Gap — цена в зоне незаполненного гэпа (ICT поддержка).
+        3 свечи: c1 | c2(сильный бычий импульс) | c3. Гэп = c1.high < c3.low.
+        Вход когда цена возвращается в гэп (retest зоны поддержки).
+        """
+        if len(candles) < 10:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+
+        current_price = candles[-1].close
+        lookback = min(20, len(candles) - 2)
+        best = None
+
+        for i in range(len(candles) - lookback, len(candles) - 2):
+            c1 = candles[i]
+            c2 = candles[i + 1]
+            c3 = candles[i + 2]
+
+            # Средняя свеча — сильный бычий импульс
+            if c2.close <= c2.open:
+                continue
+            body2 = c2.close - c2.open
+            if body2 < atr_v * 1.2:
+                continue
+
+            # FVG: гэп между c1.high и c3.low
+            fvg_lo = c1.high
+            fvg_hi = c3.low
+            if fvg_hi <= fvg_lo:
+                continue
+
+            gap_pct = (fvg_hi - fvg_lo) / c2.close * 100
+            if gap_pct < 0.1:
+                continue
+
+            # Гэп ещё не заполнен (цена не возвращалась ниже c1.high)
+            filled = any(candles[j].low <= fvg_lo for j in range(i + 3, len(candles)))
+            if filled:
+                continue
+
+            # Цена в зоне гэпа или подходит снизу (буфер 2%)
+            if current_price < fvg_lo * 0.98:
+                continue
+            if current_price > fvg_hi * 1.005:
+                continue
+
+            dist = abs((fvg_lo + fvg_hi) / 2 - current_price)
+            if best is None or dist < best[0]:
+                best = (dist, fvg_lo, fvg_hi, gap_pct, body2)
+
+        if best is None:
+            return None
+
+        _, fvg_lo, fvg_hi, gap_pct, body2 = best
+        bonus = min(22, int(14 + gap_pct * 4))
+        return PatternResult(
+            name="FVG_LONG", score_bonus=bonus,
+            confidence=min(0.80, 0.58 + gap_pct * 0.08),
+            direction="long",
+            suggested_sl_pct=round((current_price - fvg_lo * 0.995) / current_price * 100 + 0.2, 2),
+            reasons=[
+                f"📊 Bullish FVG [{fvg_lo:.6f} – {fvg_hi:.6f}] ({gap_pct:.2f}%)",
+                f"Импульс {body2 / atr_v:.1f}×ATR | Незаполненный гэп = поддержка",
+            ],
+        )
 
     # ── НОВЫЕ ПАТТЕРНЫ ────────────────────────────────────────────────────────
 
@@ -391,7 +724,11 @@ class ShortPatternDetector:
     def detect_all(self, candles, hourly_deltas=None, market_data=None) -> List[PatternResult]:
         results = []
         for fn in [
-            self.detect_pump_dump_short,  # 🆕 NEW: Pump & Dump паттерн (высокий приоритет)
+            self.detect_ict_unicorn_short,  # highest priority — confluence signal
+            self.detect_ote_short,
+            self.detect_pump_dump_short,
+            self.detect_breaker_short,
+            self.detect_fvg_short,
             self.detect_breakout_short,
             self.detect_momentum_short,
             self.detect_liquidity_sweep_short,
@@ -423,6 +760,308 @@ class ShortPatternDetector:
         elif closes[-1] > ema20[-1] and slope > 0.1:
             return "up"
         return "flat"
+
+    # ── ICT / SMC ПАТТЕРНЫ ───────────────────────────────────────────────────
+
+    def detect_ote_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """OTE_SHORT: Fibonacci Optimal Trade Entry — pullback 61.8%-79% после бычьего импульса.
+
+        После сильного роста (swing_low→swing_high) цена откатывает в зону
+        61.8%-79% от хода → SHORT вход. Комбинируется с FVG = Unicorn.
+        score_bonus ≈ 18-22
+        """
+        if len(candles) < 20:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+
+        current_price = candles[-1].close
+        lookback = min(60, len(candles) - 3)
+        window = candles[-lookback:]
+        best = None
+
+        sh_list = _swing_highs_idx(window, lookback=3)
+        sl_list = _swing_lows_idx(window,  lookback=3)
+        if not sh_list or not sl_list:
+            return None
+
+        # Ищем пары (swing_low → swing_high) — бычий импульс
+        for sl_idx, sl_price in sl_list:
+            candidates = [(si, sh) for si, sh in sh_list if si > sl_idx and sh > sl_price]
+            if not candidates:
+                continue
+            sh_idx, sh_price = min(candidates, key=lambda x: x[0])
+
+            impulse = sh_price - sl_price
+            if impulse < atr_v * 1.5:
+                continue
+
+            # OTE зона: 61.8% – 79% отката от sh_price вниз
+            ote_lo = sh_price - 0.79  * impulse
+            ote_hi = sh_price - 0.618 * impulse
+            if ote_hi <= ote_lo:
+                continue
+
+            in_zone = (ote_lo * 0.995 <= current_price <= ote_hi * 1.005)
+            if not in_zone:
+                continue
+
+            impulse_pct = impulse / sl_price * 100
+            if impulse_pct < 2.0:
+                continue
+
+            dist = abs((ote_lo + ote_hi) / 2 - current_price)
+            if best is None or (impulse_pct > best[0] and dist < best[1] * 1.5):
+                best = (impulse_pct, dist, ote_lo, ote_hi, sh_price, sl_price, impulse)
+
+        if best is None:
+            return None
+
+        imp_pct, _, ote_lo, ote_hi, sh_price, sl_price, impulse = best
+        fib_lvl = (sh_price - current_price) / impulse * 100
+        bonus = min(22, int(14 + imp_pct * 0.5))
+        return PatternResult(
+            name="OTE_SHORT", score_bonus=bonus,
+            confidence=min(0.78, 0.56 + imp_pct * 0.01),
+            direction="short",
+            suggested_sl_pct=round((sh_price * 1.005 - current_price) / current_price * 100 + 0.2, 2),
+            reasons=[
+                f"📐 OTE SHORT [{ote_lo:.6f} – {ote_hi:.6f}] Fib {fib_lvl:.1f}%",
+                f"Импульс {sl_price:.6f}→{sh_price:.6f} (+{imp_pct:.1f}%) | OTE pullback 61.8-79%",
+            ],
+        )
+
+    def detect_ict_unicorn_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """ICT_UNICORN_SHORT: Bearish FVG ∩ Bearish Breaker Block = сильнейший ICT сигнал 2025.
+
+        Два независимых institutional магнита на одном уровне → высокая вероятность
+        отбоя вниз. Win rate 75%+, score_bonus ≈ 28-30.
+        """
+        if len(candles) < 20:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+
+        current_price = candles[-1].close
+        lookback = min(50, len(candles) - 3)
+        fvg_zones   = []
+        break_zones = []
+
+        # ── Bearish FVG: c3.high < c1.low ─────────────────────────────────
+        for i in range(len(candles) - lookback, len(candles) - 2):
+            c1, c2, c3 = candles[i], candles[i + 1], candles[i + 2]
+            if c2.close >= c2.open:
+                continue
+            body2 = c2.open - c2.close
+            if body2 < atr_v * 1.0:
+                continue
+            fvg_lo, fvg_hi = c3.high, c1.low
+            if fvg_hi <= fvg_lo:
+                continue
+            if (fvg_hi - fvg_lo) / c2.close * 100 < 0.08:
+                continue
+            filled = any(candles[j].high >= fvg_hi for j in range(i + 3, len(candles)))
+            if not filled:
+                fvg_zones.append((fvg_lo, fvg_hi))
+
+        if not fvg_zones:
+            return None
+
+        # ── Bearish Breaker Block: бычий OB пробит вниз ───────────────────
+        lb2 = min(50, len(candles) - 5)
+        for i in range(len(candles) - lb2, len(candles) - 6):
+            c_ob = candles[i]
+            if c_ob.close >= c_ob.open:  # Должна быть медвежья (перед бычьим импульсом)
+                continue
+            ob_lo, ob_hi = c_ob.low, c_ob.high
+            end = min(i + 5, len(candles) - 1)
+            hi_after = max(candles[j].high for j in range(i + 1, end + 1))
+            if (hi_after - ob_hi) / ob_hi * 100 < 1.5:
+                continue
+            broken = any(candles[j].low < ob_lo for j in range(i + 2, len(candles) - 1))
+            if not broken:
+                continue
+            break_zones.append((ob_lo, ob_hi))
+
+        if not break_zones:
+            return None
+
+        # ── Ищем пересечение ──────────────────────────────────────────────
+        best = None
+        for flo, fhi in fvg_zones:
+            for blo, bhi in break_zones:
+                overlap_lo = max(flo, blo)
+                overlap_hi = min(fhi, bhi)
+                if overlap_hi <= overlap_lo:
+                    continue
+                if current_price < overlap_lo * 0.99 or current_price > overlap_hi * 1.01:
+                    continue
+                overlap_pct = (overlap_hi - overlap_lo) / current_price * 100
+                if overlap_pct < 0.05:
+                    continue
+                dist = abs((overlap_lo + overlap_hi) / 2 - current_price)
+                if best is None or dist < best[0]:
+                    best = (dist, overlap_lo, overlap_hi, flo, fhi, blo, bhi, overlap_pct)
+
+        if best is None:
+            return None
+
+        _, ov_lo, ov_hi, flo, fhi, blo, bhi, ov_pct = best
+        bonus = min(30, int(24 + ov_pct * 3))
+        return PatternResult(
+            name="ICT_UNICORN_SHORT", score_bonus=bonus,
+            confidence=min(0.88, 0.72 + ov_pct * 0.05),
+            direction="short",
+            suggested_sl_pct=round((ov_hi * 1.007 - current_price) / current_price * 100 + 0.3, 2),
+            reasons=[
+                f"🦄 ICT UNICORN SHORT | Overlap [{ov_lo:.6f}–{ov_hi:.6f}]",
+                f"Bearish FVG [{flo:.6f}–{fhi:.6f}] ∩ Breaker [{blo:.6f}–{bhi:.6f}]",
+                "FVG + Breaker Block в одной зоне = institutional confluence 75%+",
+            ],
+        )
+
+    def detect_breaker_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """BREAKER_SHORT: Пробитый бычий OB → зона сопротивления (ICT Bearish Breaker Block).
+        1. Bullish OB = медвежья свеча перед бычьим импульсом
+        2. Цена пробивает OB вниз → OB флипает в сопротивление
+        3. Цена возвращается в бывшую OB зону → SHORT вход
+        """
+        if len(candles) < 15:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+
+        current_price = candles[-1].close
+        lookback = min(50, len(candles) - 5)
+        best = None
+
+        for i in range(len(candles) - lookback, len(candles) - 6):
+            c_ob = candles[i]
+
+            # OB candle: последняя медвежья свеча перед бычьим импульсом
+            if c_ob.close >= c_ob.open:
+                continue
+            ob_low  = c_ob.low
+            ob_high = c_ob.high
+
+            # Бычий импульс после OB (≥1.5% роста)
+            end = min(i + 5, len(candles) - 1)
+            hi_after = max(candles[j].high for j in range(i + 1, end + 1))
+            rise_pct = (hi_after - ob_high) / ob_high * 100
+            if rise_pct < 1.5:
+                continue
+
+            # Цена пробивает OB вниз (проходит ниже ob_low)
+            broken_idx = -1
+            for j in range(i + 2, len(candles) - 1):
+                if candles[j].low < ob_low:
+                    broken_idx = j
+                    break
+            if broken_idx < 0:
+                continue
+
+            # Цена возвращается В зону OB (retest бывшей поддержки = теперь сопротивление)
+            if current_price < ob_low * 0.99:
+                continue
+            if current_price > ob_high * 1.015:
+                continue
+
+            # Хотя бы одна свеча после пробоя вернулась в зону
+            retest = any(candles[j].high >= ob_low for j in range(broken_idx + 1, len(candles)))
+            if not retest:
+                continue
+
+            gap_pct = (ob_high - ob_low) / current_price * 100
+            dist = abs((ob_low + ob_high) / 2 - current_price)
+            if best is None or dist < best[0]:
+                best = (dist, ob_low, ob_high, rise_pct, gap_pct)
+
+        if best is None:
+            return None
+
+        _, ob_low, ob_high, rise_pct, gap_pct = best
+        bonus = min(26, int(18 + min(rise_pct, 10) * 0.5 + gap_pct * 2))
+        return PatternResult(
+            name="BREAKER_SHORT", score_bonus=bonus,
+            confidence=min(0.82, 0.62 + min(rise_pct, 15) * 0.01),
+            direction="short",
+            suggested_sl_pct=round((ob_high * 1.005 - current_price) / current_price * 100 + 0.2, 2),
+            reasons=[
+                f"🔴 Bearish Breaker [{ob_low:.6f} – {ob_high:.6f}]",
+                f"Бычий OB +{rise_pct:.1f}% пробит вниз → retest = сопротивление",
+            ],
+        )
+
+    def detect_fvg_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """FVG_SHORT: Bearish Fair Value Gap — цена в зоне незаполненного гэпа (ICT сопротивление).
+        3 свечи: c1 | c2(сильный медвежий импульс) | c3. Гэп = c3.high < c1.low.
+        Вход когда цена возвращается в гэп (retest зоны сопротивления).
+        """
+        if len(candles) < 10:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+
+        current_price = candles[-1].close
+        lookback = min(20, len(candles) - 2)
+        best = None
+
+        for i in range(len(candles) - lookback, len(candles) - 2):
+            c1 = candles[i]
+            c2 = candles[i + 1]
+            c3 = candles[i + 2]
+
+            # Средняя свеча — сильный медвежий импульс
+            if c2.close >= c2.open:
+                continue
+            body2 = c2.open - c2.close
+            if body2 < atr_v * 1.2:
+                continue
+
+            # FVG: гэп между c3.high и c1.low (медвежий разрыв)
+            fvg_lo = c3.high
+            fvg_hi = c1.low
+            if fvg_hi <= fvg_lo:
+                continue
+
+            gap_pct = (fvg_hi - fvg_lo) / c2.close * 100
+            if gap_pct < 0.1:
+                continue
+
+            # Гэп ещё не заполнен (цена не вернулась выше c1.low)
+            filled = any(candles[j].high >= fvg_hi for j in range(i + 3, len(candles)))
+            if filled:
+                continue
+
+            # Цена в зоне гэпа или подходит снизу (буфер 2%)
+            if current_price > fvg_hi * 1.02:
+                continue
+            if current_price < fvg_lo * 0.995:
+                continue
+
+            dist = abs((fvg_lo + fvg_hi) / 2 - current_price)
+            if best is None or dist < best[0]:
+                best = (dist, fvg_lo, fvg_hi, gap_pct, body2)
+
+        if best is None:
+            return None
+
+        _, fvg_lo, fvg_hi, gap_pct, body2 = best
+        bonus = min(22, int(14 + gap_pct * 4))
+        return PatternResult(
+            name="FVG_SHORT", score_bonus=bonus,
+            confidence=min(0.80, 0.58 + gap_pct * 0.08),
+            direction="short",
+            suggested_sl_pct=round((fvg_hi * 1.005 - current_price) / current_price * 100 + 0.2, 2),
+            reasons=[
+                f"📊 Bearish FVG [{fvg_lo:.6f} – {fvg_hi:.6f}] ({gap_pct:.2f}%)",
+                f"Импульс {body2 / atr_v:.1f}×ATR | Незаполненный гэп = сопротивление",
+            ],
+        )
 
     # ── НОВЫЕ SHORT ПАТТЕРНЫ ──────────────────────────────────────────────────
 

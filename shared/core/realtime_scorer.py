@@ -47,14 +47,6 @@ from datetime import datetime, timedelta
 import aiohttp
 import asyncio
 
-# 🆕 Multi-timeframe support
-from .multi_timeframe_detector import (
-    MultiTimeframeDetector,
-    Timeframe,
-    AggregatedSignal,
-    format_multi_tf_message
-)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # RESULT TYPES
 # ─────────────────────────────────────────────────────────────────────────────
