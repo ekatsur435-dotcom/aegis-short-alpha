@@ -659,8 +659,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     # MOMENTUM SHORT: RSI низкий, цена падает → trend continuation SHORT
                     _mtf_bonus = 5
                     if verbose: print(f"{log_prefix} 📉 [MTF] RSI {rsi_1h:.0f} низкий но DOWNTREND {_p1h:.1f}%/1H — SHORT продолжение +5")
-                elif rsi_4h < 40 and rsi_1h < 45:
-                    # Fix: при BEARISH HTF RSI 25-38 — это норма даунтренда, не штрафуем
+                elif rsi_4h < 30 and rsi_1h < 45:
+                    # RSI 4H < 30 = экстремальная перепроданность — штрафуем только тут
+                    # RSI 30-40 = нижняя зона даунтренда, штрафовать нельзя (пропускаем сигналы)
                     _htf_for_mtf = getattr(getattr(md, 'market_structure', None), 'htf_structure', '') or ''
                     if "bear" not in _htf_for_mtf.lower():
                         _mtf_bonus = -5  # Перепродан без ценового подтверждения — лёгкий штраф

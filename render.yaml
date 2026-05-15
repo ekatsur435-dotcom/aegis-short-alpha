@@ -48,7 +48,7 @@ services:
       - key: MIN_SHORT_BASE_SCORE
         value: "50"          # BASE_SCORER порог (мягче — AEGIS потом доуточняет)
       - key: SCAN_INTERVAL
-        value: "120"          # П8: было 180 → 120s
+        value: "180"          # П8: было 180 → 120s
       - key: MAX_POSITIONS
         value: "15"
       - key: SHORT_SL_BUFFER
