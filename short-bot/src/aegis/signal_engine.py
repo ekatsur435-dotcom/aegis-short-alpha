@@ -24,7 +24,12 @@ from typing import Dict, List, Optional, Tuple, Any
 logger = logging.getLogger("aegis.signal_engine")
 
 # ✅ FIX: Z_VOLUME_GATE_MIN теперь читается из ENV (было хардкод 15)
-_Z_VOLUME_GATE_MIN = int(float(os.getenv("Z_VOLUME_GATE_MIN_SHORT", os.getenv("Z_VOLUME_GATE_MIN", "15"))))
+_Z_VOLUME_GATE_MIN      = int(float(os.getenv("Z_VOLUME_GATE_MIN_SHORT", os.getenv("Z_VOLUME_GATE_MIN", "15"))))
+# Momentum SHORT bypass — аналог LONG бота: при сильном даунтренде обходим z_volume gate
+_ENABLE_MOMENTUM_SHORT  = os.getenv("ENABLE_MOMENTUM_SHORT", "true").lower() == "true"
+_MOMENTUM_RSI_MAX_SHORT = float(os.getenv("MOMENTUM_RSI_MAX_SHORT", "48"))   # RSI ниже этого = падение
+_MOMENTUM_VOL_MIN_SHORT = float(os.getenv("MOMENTUM_VOL_MIN_SHORT", "1.3"))  # мин volume spike
+_MOMENTUM_DOWNTREND_1H  = float(os.getenv("MOMENTUM_DOWNTREND_1H",  "-1.5")) # мин падение 1H %
 
 
 class SignalStrength(Enum):
@@ -348,15 +353,40 @@ class AegisSignalEngine:
         final_score = total_weighted  # веса = 1.0, raw_score 0-100
 
         # HARD GATE: z_volume — главный индикатор SHORT (памп/перекупленность).
-        # Без признаков pump exhaustion SHORT невозможен по стратегии.
         # ✅ FIX: порог читается из ENV Z_VOLUME_GATE_MIN_SHORT (было хардкод 15)
+        # ✅ Momentum SHORT bypass: при сильном даунтренде + volume spike обходим gate.
         z_vol = components.get("z_volume")
-        if z_vol and z_vol.raw_score < _Z_VOLUME_GATE_MIN:
-            logger.info(
-                f"[AEGIS REJECT] {symbol}: z_volume={z_vol.raw_score:.0f} < 15 "
-                f"— нет признаков pump exhaustion, сигнал отклонён"
-            )
-            return None
+        _z_gate_failed = z_vol and z_vol.raw_score < _Z_VOLUME_GATE_MIN
+        if _z_gate_failed:
+            _momentum_bypass = False
+            if _ENABLE_MOMENTUM_SHORT:
+                _rsi     = getattr(market_data, "rsi_1h", 50)              or 50
+                _vol_spk = getattr(market_data, "volume_spike_ratio", 1.0) or 1.0
+                _p1h     = getattr(market_data, "price_change_1h", 0)      or 0
+                _p4h     = getattr(market_data, "price_change_4h", 0)      or 0
+                _p24h    = getattr(market_data, "price_change_24h", 0)     or 0
+                # Momentum SHORT: RSI низкий + volume spike + цена падает
+                if (_rsi <= _MOMENTUM_RSI_MAX_SHORT
+                        and _vol_spk >= _MOMENTUM_VOL_MIN_SHORT
+                        and (_p1h < _MOMENTUM_DOWNTREND_1H or _p4h < -5.0 or _p24h < -5.0)):
+                    _momentum_bypass = True
+                    all_reasons.append(
+                        f"MOMENTUM SHORT bypass: RSI={_rsi:.0f} Vol×{_vol_spk:.1f} "
+                        f"1H={_p1h:+.1f}% 4H={_p4h:+.1f}%"
+                    )
+                    logger.info(
+                        f"[AEGIS MOMENTUM SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"→ Momentum bypass (RSI={_rsi:.0f} Vol×{_vol_spk:.1f} 1H={_p1h:+.1f}%)"
+                    )
+                    if _p24h < -15: final_score = min(final_score + 10, 100)
+                    elif _p24h < -8: final_score = min(final_score + 5, 100)
+
+            if not _momentum_bypass:
+                logger.info(
+                    f"[AEGIS REJECT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                    f"— нет pump exhaustion или momentum downtrend, сигнал отклонён"
+                )
+                return None
 
         if base_score > 0:
             if base_score >= 70:

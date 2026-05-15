@@ -28,10 +28,18 @@ logger = logging.getLogger(__name__)
 
 _ENABLE_ONCHAIN   = os.getenv("ENABLE_ONCHAIN", "true").lower() == "true"
 _CG_BASE_URL      = "https://api.coingecko.com/api/v3"
+_CG_API_KEY       = os.getenv("COINGECKO_API_KEY", "")            # demo key → x-cg-demo-api-key header
 _REDIS_TTL        = int(os.getenv("ONCHAIN_REDIS_TTL", "3600"))   # 1 час
 _Z_INFLOW_HIGH    = float(os.getenv("ONCHAIN_Z_INFLOW", "2.0"))   # z > этого = аномальный приток
 _Z_OUTFLOW_LOW    = float(os.getenv("ONCHAIN_Z_OUTFLOW", "-1.5")) # z < этого = аномальный отток
 _ADDR_ANOMALY_PCT = float(os.getenv("ONCHAIN_ADDR_ANOMALY_PCT", "20.0"))  # % для #35
+
+
+def _cg_headers() -> dict:
+    """Заголовки для CoinGecko API. Demo key снимает 429-лимит (30 req/min → 500/min)."""
+    if _CG_API_KEY:
+        return {"x-cg-demo-api-key": _CG_API_KEY}
+    return {}
 
 # Маппинг Binance symbol → CoinGecko id
 _SYMBOL_MAP: Dict[str, str] = {
@@ -107,7 +115,7 @@ async def get_volume_z_score(
 
         timeout = aiohttp.ClientTimeout(total=10)
 
-        async with aiohttp.ClientSession(timeout=timeout) as sess:
+        async with aiohttp.ClientSession(timeout=timeout, headers=_cg_headers()) as sess:
             async with sess.get(url, params=params) as resp:
                 if resp.status != 200:
                     return 0.0, f"[OnChain] HTTP {resp.status}"
@@ -205,7 +213,7 @@ async def get_active_addr_proxy(
         params = {"vs_currency": "usd", "days": "14", "interval": "daily"}
 
         timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as sess:
+        async with aiohttp.ClientSession(timeout=timeout, headers=_cg_headers()) as sess:
             async with sess.get(url, params=params) as resp:
                 if resp.status != 200:
                     return 0.0, f"[AddrProxy] HTTP {resp.status}"

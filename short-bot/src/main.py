@@ -586,8 +586,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                         state.redis.client.delete(count_key)
                         print(f"🚫 [{symbol}] Добавлен в постоянный блэклист ({count} промахов)")
                     else:
-                        # 24-часовой skip
-                        state.redis.client.setex(f"skip:nodata:{symbol}", 86400, "1")
+                        # skip TTL читается из ENV SKIP_NODATA_TTL (дефолт 86400 = 24ч)
+                        _skip_ttl = int(os.getenv("SKIP_NODATA_TTL", "86400"))
+                        state.redis.client.setex(f"skip:nodata:{symbol}", _skip_ttl, "1")
             except Exception:
                 pass
             return None
@@ -630,7 +631,10 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             rsi_1h  = md.rsi_1h or 50
             _p1h = getattr(md, "price_change_1h", 0) or 0
             _p4h = getattr(md, "price_change_4h", 0) or 0
-            _is_downtrend = _p1h < -3.0 or _p4h < -8.0  # Явный даунтренд по цене
+            # Пороги читаются из ENV (были хардкод -3.0 / -8.0)
+            _momentum_1h_thr = float(os.getenv("MOMENTUM_DOWNTREND_1H", "-3.0"))
+            _momentum_4h_thr = float(os.getenv("MOMENTUM_DOWNTREND_4H", "-8.0"))
+            _is_downtrend = _p1h < _momentum_1h_thr or _p4h < _momentum_4h_thr
 
             # Шорт: все таймфреймы перегреты → сильный сигнал
             if rsi_4h and rsi_30m:
