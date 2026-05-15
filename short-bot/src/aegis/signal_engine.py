@@ -37,6 +37,11 @@ _OVERBOUGHT_RSI_MIN_SHORT = float(os.getenv("OVERBOUGHT_RSI_MIN_SHORT", "63"))  
 _ENABLE_BEARISH_CONT_SHORT  = os.getenv("ENABLE_BEARISH_CONT_SHORT", "true").lower() == "true"
 _BEARISH_CONT_RSI_MIN       = float(os.getenv("BEARISH_CONT_RSI_MIN_SHORT", "30"))   # RSI выше этого (не на дне)
 _BEARISH_CONT_RSI_MAX       = float(os.getenv("BEARISH_CONT_RSI_MAX_SHORT", "60"))   # RSI ниже этого (RANGING даёт RSI~55)
+# Extreme Funding + Multi-Pattern bypass (AGIUSDT тип)
+_ENABLE_EXTREME_FUNDING_BYPASS  = os.getenv("ENABLE_EXTREME_FUNDING_BYPASS", "true").lower() == "true"
+_EXTREME_FUNDING_THRESHOLD      = float(os.getenv("EXTREME_FUNDING_BYPASS_THRESHOLD", "0.05"))  # funding ≥ 0.05%
+_EXTREME_FUNDING_MIN_PATTERNS   = int(os.getenv("EXTREME_FUNDING_BYPASS_MIN_PATTERNS", "3"))    # мин паттернов
+_EXTREME_FUNDING_MIN_BASE       = float(os.getenv("EXTREME_FUNDING_BYPASS_MIN_BASE", "70"))     # мин base_score
 _BEARISH_CONT_BASE_MIN      = float(os.getenv("BEARISH_CONT_BASE_MIN_SHORT", "50"))  # минимальный BASE score
 # Extreme funding — когда лонги переплачивают слишком много: funding spike = шортовый сигнал
 _FUNDING_EXTREME_SHORT      = float(os.getenv("FUNDING_EXTREME_SHORT", "0.05"))  # % за 8ч
@@ -445,6 +450,24 @@ class AegisSignalEngine:
                         f"[AEGIS BEARISH CONT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
                         f"→ Bearish continuation bypass (RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
                         f"24H={_p24h_bc:+.1f}%)"
+                    )
+
+            # Extreme Funding + Multi-Pattern bypass: шорты платят лонгистам + структурные паттерны
+            if not _momentum_bypass and _ENABLE_EXTREME_FUNDING_BYPASS:
+                _funding_ef  = getattr(market_data, "funding_rate", 0.0)     or 0.0
+                _pats_ef     = getattr(market_data, "patterns", [])           or []
+                _n_pats_ef   = len(_pats_ef)
+                if (_funding_ef >= _EXTREME_FUNDING_THRESHOLD
+                        and _n_pats_ef >= _EXTREME_FUNDING_MIN_PATTERNS
+                        and base_score >= _EXTREME_FUNDING_MIN_BASE):
+                    _momentum_bypass = True
+                    all_reasons.append(
+                        f"EXTREME FUNDING bypass: funding={_funding_ef:.4f}% "
+                        f"patterns={_n_pats_ef} base={base_score:.0f}"
+                    )
+                    logger.info(
+                        f"[AEGIS EXTREME FUNDING] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"→ Extreme funding bypass (funding={_funding_ef:.4f}% pats={_n_pats_ef} base={base_score:.0f})"
                     )
 
             if not _momentum_bypass:

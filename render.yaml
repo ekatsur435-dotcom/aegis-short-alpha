@@ -89,6 +89,18 @@ services:
         value: "false"
       - key: SKIP_NODATA_TTL
         value: "3600"           # 1ч skip вместо 24ч — быстрее восстановление после ошибок
+      - key: COINMARKETCAP_API_KEY
+        sync: false  # ← Прописать в Render Dashboard
+      - key: COINGLASS_API_KEY
+        sync: false  # ← Прописать в Render Dashboard
+      - key: ENABLE_EXTREME_FUNDING_BYPASS
+        value: "true"
+      - key: EXTREME_FUNDING_BYPASS_THRESHOLD
+        value: "0.05"           # funding ≥ 0.05% + ≥3 паттернов + base≥70 → bypass z_volume
+      - key: EXTREME_FUNDING_BYPASS_MIN_PATTERNS
+        value: "3"
+      - key: EXTREME_FUNDING_BYPASS_MIN_BASE
+        value: "70"
       - key: ENABLE_MOMENTUM_SHORT
         value: "true"
       - key: MOMENTUM_RSI_MAX_SHORT
@@ -185,6 +197,10 @@ services:
         value: "2.0"             # ATR SL не ближе 2% от входа (было 1.0)
       - key: LONG_SL_HARD_MIN_PCT
         value: "2.0"             # Абсолютный минимум SL от входа — защита от tight SL
+      - key: COINMARKETCAP_API_KEY
+        sync: false  # ← Прописать в Render Dashboard
+      - key: COINGLASS_API_KEY
+        sync: false  # ← Прописать в Render Dashboard
       - key: LONG_LEVERAGE
         value: "5-20"
       - key: MIN_VOLUME_USDT

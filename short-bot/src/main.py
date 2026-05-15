@@ -660,8 +660,13 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     _mtf_bonus = 5
                     if verbose: print(f"{log_prefix} 📉 [MTF] RSI {rsi_1h:.0f} низкий но DOWNTREND {_p1h:.1f}%/1H — SHORT продолжение +5")
                 elif rsi_4h < 40 and rsi_1h < 45:
-                    _mtf_bonus = -5  # Перепродан без ценового подтверждения — лёгкий штраф
-                    if verbose: print(f"{log_prefix} ⚠️ [MTF] RSI 4H={rsi_4h} перепродан без тренда {_mtf_bonus}")
+                    # Fix: при BEARISH HTF RSI 25-38 — это норма даунтренда, не штрафуем
+                    _htf_for_mtf = getattr(getattr(md, 'market_structure', None), 'htf_structure', '') or ''
+                    if "bear" not in _htf_for_mtf.lower():
+                        _mtf_bonus = -5  # Перепродан без ценового подтверждения — лёгкий штраф
+                        if verbose: print(f"{log_prefix} ⚠️ [MTF] RSI 4H={rsi_4h} перепродан без тренда {_mtf_bonus}")
+                    else:
+                        if verbose: print(f"{log_prefix} ℹ️ [MTF] RSI 4H={rsi_4h} низкий но HTF=BEARISH — штраф отменён")
             elif rsi_4h:
                 if rsi_4h > 70: _mtf_bonus = 8
                 elif rsi_4h > 65: _mtf_bonus = 4
@@ -1082,6 +1087,23 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                         print(f"{log_prefix} 🎯 [SWING SL] {_sw_desc}")
         except Exception as _sw_e:
             pass
+
+        # ── POC 4H Structural SL (приоритет 1.5 — после Swing, перед ATR) ─────
+        # SL ставится за POC 4H если он выше текущей цены (уровень макс. объёма = сопротивление)
+        if not _swing_sl_used:
+            try:
+                _poc4h = getattr(getattr(md, 'market_structure', None), 'poc_4h', 0) or 0
+                if _poc4h > 0 and _poc4h > price:
+                    _poc_sl_pct = (_poc4h - price) / price * 100
+                    _sl_min = getattr(Config, 'ATR_SL_MIN', 1.5)
+                    _sl_max = getattr(Config, 'ATR_SL_MAX', 8.0)
+                    if _sl_min <= _poc_sl_pct <= _sl_max:
+                        stop_loss = _poc4h
+                        _swing_sl_used = True
+                        if verbose:
+                            print(f"{log_prefix} 🏗 [POC SL] POC4H={_poc4h:.6f} → SL ({_poc_sl_pct:.2f}%) за уровень макс. объёма")
+            except Exception:
+                pass
 
         # ── ATR-dynamic SL (M1) для SHORT: SL ВЫШЕ входа ──────────────
         # ✅ v2.1: ATR-based SL вместо фиксированного % (приоритет 2)
