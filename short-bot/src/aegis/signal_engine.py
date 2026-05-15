@@ -33,6 +33,11 @@ _MOMENTUM_DOWNTREND_1H  = float(os.getenv("MOMENTUM_DOWNTREND_1H",  "-1.5")) # �
 # Overbought SHORT bypass — при перекупленности + Premium zone + медвежий паттерн (RSI высокий, нет резкого памп)
 _ENABLE_OVERBOUGHT_SHORT  = os.getenv("ENABLE_OVERBOUGHT_SHORT", "true").lower() == "true"
 _OVERBOUGHT_RSI_MIN_SHORT = float(os.getenv("OVERBOUGHT_RSI_MIN_SHORT", "63"))  # RSI выше = перекуплен
+# Bearish Continuation bypass — для плавных даунтрендов без volume spike (CETUS/AGI тип)
+_ENABLE_BEARISH_CONT_SHORT  = os.getenv("ENABLE_BEARISH_CONT_SHORT", "true").lower() == "true"
+_BEARISH_CONT_RSI_MIN       = float(os.getenv("BEARISH_CONT_RSI_MIN_SHORT", "30"))   # RSI выше этого (не на дне)
+_BEARISH_CONT_RSI_MAX       = float(os.getenv("BEARISH_CONT_RSI_MAX_SHORT", "55"))   # RSI ниже этого (не перекуплен)
+_BEARISH_CONT_BASE_MIN      = float(os.getenv("BEARISH_CONT_BASE_MIN_SHORT", "55"))  # минимальный BASE score
 
 
 class SignalStrength(Enum):
@@ -405,6 +410,28 @@ class AegisSignalEngine:
                     logger.info(
                         f"[AEGIS OVERBOUGHT SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
                         f"→ Overbought bypass (RSI={_rsi_ob:.0f} L/S={_ls_ob:.0f}% pattern)"
+                    )
+
+            # Bearish Continuation bypass: плавный даунтренд без pump spike (CETUS/AGI тип)
+            if not _momentum_bypass and _ENABLE_BEARISH_CONT_SHORT:
+                _rsi_bc  = getattr(market_data, "rsi_1h", 50)           or 50
+                _p4h_bc  = getattr(market_data, "price_change_4h", 0)   or 0
+                _p24h_bc = getattr(market_data, "price_change_24h", 0)  or 0
+                _htf_bc  = getattr(market_data, "htf_structure", "")    or ""
+                _htf_is_bear_bc = "bear" in _htf_bc.lower()
+                if (_BEARISH_CONT_RSI_MIN <= _rsi_bc <= _BEARISH_CONT_RSI_MAX
+                        and (_p4h_bc < -3.0 or _p24h_bc < -8.0)
+                        and _htf_is_bear_bc
+                        and base_score >= _BEARISH_CONT_BASE_MIN):
+                    _momentum_bypass = True
+                    all_reasons.append(
+                        f"BEARISH CONT bypass: RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
+                        f"24H={_p24h_bc:+.1f}% HTF={_htf_bc[:20]}"
+                    )
+                    logger.info(
+                        f"[AEGIS BEARISH CONT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"→ Bearish continuation bypass (RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
+                        f"24H={_p24h_bc:+.1f}%)"
                     )
 
             if not _momentum_bypass:

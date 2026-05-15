@@ -966,7 +966,8 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             if verbose:
                 print(f"{log_prefix} 🎯 [CASCADE SHORT] +{_cas.score_bonus}: {_cas.description[:80]}")
         # 🆕 Консолидация фильтр — блокировка входов в середине диапазона
-        if state.consolidation_detector and ohlcv_15m:
+        _cons_filter_on = os.getenv("CONSOLIDATION_FILTER_ENABLED", "true").lower() == "true"
+        if _cons_filter_on and state.consolidation_detector and ohlcv_15m:
             cons = state.consolidation_detector.detect(ohlcv_15m, price)
             # ✅ FIX #4: передаём RSI 1H для исключения при экстремальной перегретости
             rsi_1h_val = getattr(md, "rsi_1h", 50.0) or 50.0

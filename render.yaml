@@ -101,6 +101,16 @@ services:
         value: "true"
       - key: OVERBOUGHT_RSI_MIN_SHORT
         value: "63"             # RSI ≥ 63 + trend=up + L/S≥55% + паттерн → шорт без volume spike
+      - key: CONSOLIDATION_FILTER_ENABLED
+        value: "true"           # false = отключить фильтр консолидации полностью
+      - key: ENABLE_BEARISH_CONT_SHORT
+        value: "true"
+      - key: BEARISH_CONT_RSI_MIN_SHORT
+        value: "30"             # RSI выше этого — не на дне, ещё есть потенциал падения
+      - key: BEARISH_CONT_RSI_MAX_SHORT
+        value: "55"             # RSI ниже этого — не перекуплен
+      - key: BEARISH_CONT_BASE_MIN_SHORT
+        value: "55"             # Минимальный BASE score для активации bypass
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
