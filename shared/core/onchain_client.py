@@ -33,6 +33,9 @@ _REDIS_TTL        = int(os.getenv("ONCHAIN_REDIS_TTL", "3600"))   # 1 час
 _Z_INFLOW_HIGH    = float(os.getenv("ONCHAIN_Z_INFLOW", "2.0"))   # z > этого = аномальный приток
 _Z_OUTFLOW_LOW    = float(os.getenv("ONCHAIN_Z_OUTFLOW", "-1.5")) # z < этого = аномальный отток
 _ADDR_ANOMALY_PCT = float(os.getenv("ONCHAIN_ADDR_ANOMALY_PCT", "20.0"))  # % для #35
+_CMC_API_KEY      = os.getenv("COINMARKETCAP_API_KEY", "")        # CMC fallback
+_CMC_BASE_URL     = "https://pro-api.coinmarketcap.com"
+_CG_ID_CACHE_TTL  = 86400                                          # 24ч — маппинг меняется редко
 
 
 def _cg_headers() -> dict:
@@ -40,6 +43,100 @@ def _cg_headers() -> dict:
     if _CG_API_KEY:
         return {"x-cg-demo-api-key": _CG_API_KEY}
     return {}
+
+
+def _extract_base(symbol: str) -> str:
+    """PLAYSOUTUSDT → PLAYSOUT, 1000SHIBUSDT → SHIB, 1000000XECUSDT → XEC"""
+    return symbol.replace("USDT", "").replace("BUSD", "").replace("1000000", "").replace("1000", "").upper()
+
+
+async def _search_coingecko_dynamic(base: str) -> Optional[str]:
+    """Динамический поиск CoinGecko ID по тикеру через /api/v3/search."""
+    try:
+        import aiohttp
+        url = f"{_CG_BASE_URL}/search"
+        params = {"query": base}
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout, headers=_cg_headers()) as sess:
+            async with sess.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        for coin in data.get("coins", []):
+            if coin.get("symbol", "").upper() == base.upper():
+                return coin["id"]
+        return None
+    except Exception as e:
+        logger.debug(f"[OnChain] CG search {base}: {e}")
+        return None
+
+
+async def _get_cmc_volume(base: str) -> Optional[tuple]:
+    """CMC fallback: возвращает (volume_24h, pct_change_24h) или None."""
+    if not _CMC_API_KEY:
+        return None
+    try:
+        import aiohttp
+        url = f"{_CMC_BASE_URL}/v1/cryptocurrency/quotes/latest"
+        headers = {"X-CMC_PRO_API_KEY": _CMC_API_KEY, "Accept": "application/json"}
+        params = {"symbol": base, "convert": "USD"}
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.get(url, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        coins = data.get("data", {})
+        if isinstance(coins, dict):
+            entry = coins.get(base.upper())
+            if entry:
+                if isinstance(entry, list):
+                    entry = entry[0]
+                quote = entry.get("quote", {}).get("USD", {})
+                vol    = float(quote.get("volume_24h", 0) or 0)
+                pct    = float(quote.get("volume_change_24h", 0) or 0)
+                return (vol, pct)
+        return None
+    except Exception as e:
+        logger.debug(f"[OnChain] CMC {base}: {e}")
+        return None
+
+
+def _cmc_pct_to_z(pct_change_24h: float) -> float:
+    """% изменение объёма CMC → приближённый z-score для совместимости."""
+    if pct_change_24h >= 100:  return 2.5
+    if pct_change_24h >= 50:   return 1.5
+    if pct_change_24h >= 20:   return 0.8
+    if pct_change_24h >= -20:  return 0.0
+    if pct_change_24h >= -40:  return -1.0
+    return -2.0
+
+
+async def _resolve_dynamic_id(symbol: str, redis_client=None) -> Optional[str]:
+    """
+    Резолвит CoinGecko ID для неизвестного символа.
+    Redis cache (24ч) → CoinGecko search API.
+    Возвращает cg_id или None.
+    """
+    id_key = f"onchain:cg_id:{symbol}"
+    if redis_client:
+        try:
+            cached = redis_client.get(id_key)
+            if cached:
+                val = cached if isinstance(cached, str) else cached.decode()
+                return None if val == "NOT_FOUND" else val
+        except Exception:
+            pass
+    base = _extract_base(symbol)
+    cg_id = await _search_coingecko_dynamic(base)
+    if redis_client:
+        try:
+            redis_client.setex(id_key, _CG_ID_CACHE_TTL, cg_id or "NOT_FOUND")
+        except Exception:
+            pass
+    if cg_id:
+        logger.info(f"[OnChain] {symbol}: CoinGecko search → {cg_id}")
+    return cg_id
 
 # Маппинг Binance symbol → CoinGecko id
 _SYMBOL_MAP: Dict[str, str] = {
@@ -143,12 +240,9 @@ async def get_volume_z_score(
     if not _ENABLE_ONCHAIN:
         return 0.0, ""
 
-    cg_id = _SYMBOL_MAP.get(symbol)
-    if not cg_id:
-        return 0.0, f"[OnChain] {symbol}: нет маппинга CoinGecko"
-
-    # Проверяем Redis кеш
     cache_key = f"onchain:vol_z:{symbol}"
+
+    # Проверяем Redis кеш (до резолвинга ID — работает для всех источников)
     if redis_client:
         try:
             cached = redis_client.get(cache_key)
@@ -157,6 +251,28 @@ async def get_volume_z_score(
                 return data["z"], data["desc"]
         except Exception:
             pass
+
+    # Резолвим CoinGecko ID: статический маппинг → динамический поиск
+    cg_id = _SYMBOL_MAP.get(symbol)
+    if not cg_id:
+        cg_id = await _resolve_dynamic_id(symbol, redis_client)
+
+    # CMC fallback если CoinGecko не нашёл
+    if not cg_id:
+        base = _extract_base(symbol)
+        cmc = await _get_cmc_volume(base)
+        if cmc:
+            _vol, _pct = cmc
+            z = _cmc_pct_to_z(_pct)
+            desc = f"OnChain(CMC): z≈{z:.1f} vol_chg={_pct:+.0f}%"
+            logger.info(f"[OnChain] {symbol}: CMC fallback z≈{z:.1f} vol_chg={_pct:+.0f}%")
+            if redis_client:
+                try:
+                    redis_client.setex(cache_key, _REDIS_TTL, json.dumps({"z": z, "desc": desc}))
+                except Exception:
+                    pass
+            return z, desc
+        return 0.0, f"[OnChain] {symbol}: нет маппинга CoinGecko/CMC"
 
     # Запрашиваем CoinGecko
     try:
@@ -244,11 +360,9 @@ async def get_active_addr_proxy(
     if not _ENABLE_ONCHAIN:
         return 0.0, ""
 
-    cg_id = _SYMBOL_MAP.get(symbol)
-    if not cg_id:
-        return 0.0, f"[AddrProxy] {symbol}: нет маппинга"
-
     cache_key = f"onchain:addr_proxy:{symbol}"
+
+    # Redis кеш (до резолвинга)
     if redis_client:
         try:
             cached = redis_client.get(cache_key)
@@ -257,6 +371,34 @@ async def get_active_addr_proxy(
                 return data["pct"], data["desc"]
         except Exception:
             pass
+
+    # Резолвим CoinGecko ID
+    cg_id = _SYMBOL_MAP.get(symbol)
+    if not cg_id:
+        cg_id = await _resolve_dynamic_id(symbol, redis_client)
+
+    # CMC fallback
+    if not cg_id:
+        base = _extract_base(symbol)
+        cmc = await _get_cmc_volume(base)
+        if cmc:
+            _vol, _pct = cmc
+            # vol_change_24h → грубый proxy для 7-дневного изменения активности
+            change_pct = round(max(-80.0, min(80.0, _pct * 0.5)), 1)
+            if change_pct >= _ADDR_ANOMALY_PCT:
+                desc = f"🟢 AddrProxy(CMC): объём +{_pct:.0f}% → рост активности"
+            elif change_pct <= -_ADDR_ANOMALY_PCT:
+                desc = f"🔴 AddrProxy(CMC): объём {_pct:.0f}% → спад активности"
+            else:
+                desc = f"AddrProxy(CMC): {_pct:+.0f}% нейтрально"
+            logger.info(f"[AddrProxy] {symbol}: CMC fallback {_pct:+.0f}%")
+            if redis_client:
+                try:
+                    redis_client.setex(cache_key, _REDIS_TTL, json.dumps({"pct": change_pct, "desc": desc}))
+                except Exception:
+                    pass
+            return change_pct, desc
+        return 0.0, f"[AddrProxy] {symbol}: нет маппинга CoinGecko/CMC"
 
     try:
         import aiohttp
