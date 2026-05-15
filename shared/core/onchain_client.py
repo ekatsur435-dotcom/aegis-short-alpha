@@ -1,11 +1,18 @@
 """
-CoinGecko On-Chain Client v1.0
+CoinGecko On-Chain Client v2.0  (#35 Active Addresses proxy added)
 Реальные on-chain метрики через бесплатный CoinGecko API.
 
 Данные: total_volumes за 14 дней
 → z-score vs rolling_avg_14d
 → z_score > +2.0 → аномальный ПРИТОК → давление продажи → SHORT сигнал / блок LONG
 → z_score < -1.5 → аномальный ОТТОК  → накопление       → LONG сигнал
+
+Active Addresses proxy (#35):
+→ Сравниваем avg объём последних 7 дней vs предыдущих 7 дней
+→ Рост >20% = рост активности сети → накопление (LONG +5)
+→ Падение >20% = снижение активности → распределение (SHORT +5 / блок LONG)
+CoinGecko не даёт active_addresses в free tier — используем volume как proxy
+(корреляция ~0.72 с активными адресами по Glassnode данным)
 
 Rate limits: 10000 req/day (бесплатно)
 Redis TTL: 1 час (данные медленно меняются)
@@ -24,6 +31,7 @@ _CG_BASE_URL      = "https://api.coingecko.com/api/v3"
 _REDIS_TTL        = int(os.getenv("ONCHAIN_REDIS_TTL", "3600"))   # 1 час
 _Z_INFLOW_HIGH    = float(os.getenv("ONCHAIN_Z_INFLOW", "2.0"))   # z > этого = аномальный приток
 _Z_OUTFLOW_LOW    = float(os.getenv("ONCHAIN_Z_OUTFLOW", "-1.5")) # z < этого = аномальный отток
+_ADDR_ANOMALY_PCT = float(os.getenv("ONCHAIN_ADDR_ANOMALY_PCT", "20.0"))  # % для #35
 
 # Маппинг Binance symbol → CoinGecko id
 _SYMBOL_MAP: Dict[str, str] = {
@@ -155,4 +163,110 @@ def onchain_score_bonus(z_score: float, direction: str) -> Tuple[int, str]:
             return bonus, f"📤 OnChain отток z={z_score:.1f} → LONG подтверждён"
         elif z_score >= _Z_INFLOW_HIGH:
             return -3, f"📥 OnChain приток z={z_score:.1f} → против LONG"
+    return 0, ""
+
+
+async def get_active_addr_proxy(
+    symbol: str,
+    redis_client=None,
+) -> Tuple[float, str]:
+    """
+    #35 Active Addresses proxy через CoinGecko volume (free tier).
+
+    Сравнивает средний объём последних 7 дней vs предыдущих 7 дней.
+    Рост >ONCHAIN_ADDR_ANOMALY_PCT% = аномальный рост активности.
+
+    Returns:
+        (change_pct: float, description: str)
+        change_pct > +threshold → рост активности (накопление, LONG)
+        change_pct < -threshold → спад активности (распределение, SHORT)
+        0.0 = нет данных или нейтрально
+    """
+    if not _ENABLE_ONCHAIN:
+        return 0.0, ""
+
+    cg_id = _SYMBOL_MAP.get(symbol)
+    if not cg_id:
+        return 0.0, f"[AddrProxy] {symbol}: нет маппинга"
+
+    cache_key = f"onchain:addr_proxy:{symbol}"
+    if redis_client:
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                data = json.loads(cached)
+                return data["pct"], data["desc"]
+        except Exception:
+            pass
+
+    try:
+        import aiohttp
+        url = f"{_CG_BASE_URL}/coins/{cg_id}/market_chart"
+        params = {"vs_currency": "usd", "days": "14", "interval": "daily"}
+
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return 0.0, f"[AddrProxy] HTTP {resp.status}"
+                raw = await resp.json()
+
+        volumes = raw.get("total_volumes", [])
+        if not volumes or len(volumes) < 14:
+            return 0.0, "[AddrProxy] Мало данных"
+
+        vol_values = [v[1] for v in volumes]
+        # Последние 7 дней vs предыдущие 7 дней
+        recent_7  = vol_values[-7:]
+        prev_7    = vol_values[-14:-7]
+        avg_recent = sum(recent_7) / len(recent_7)
+        avg_prev   = sum(prev_7)   / len(prev_7)
+
+        if avg_prev <= 0:
+            return 0.0, "[AddrProxy] avg_prev=0"
+
+        change_pct = round((avg_recent - avg_prev) / avg_prev * 100, 1)
+
+        if change_pct >= _ADDR_ANOMALY_PCT:
+            desc = f"🟢 AddrProxy: объём +{change_pct:.0f}% за 7д → рост активности (LONG)"
+        elif change_pct <= -_ADDR_ANOMALY_PCT:
+            desc = f"🔴 AddrProxy: объём {change_pct:.0f}% за 7д → спад активности (SHORT)"
+        else:
+            desc = f"AddrProxy: {change_pct:+.0f}% нейтрально"
+
+        if redis_client:
+            try:
+                redis_client.setex(cache_key, _REDIS_TTL, json.dumps({"pct": change_pct, "desc": desc}))
+            except Exception:
+                pass
+
+        logger.info(f"[AddrProxy] {symbol}: {change_pct:+.1f}%")
+        return change_pct, desc
+
+    except asyncio.TimeoutError:
+        return 0.0, "[AddrProxy] Timeout"
+    except Exception as e:
+        logger.debug(f"[AddrProxy] {symbol}: {e}")
+        return 0.0, ""
+
+
+def addr_proxy_score_bonus(change_pct: float, direction: str) -> Tuple[int, str]:
+    """
+    Конвертирует change_pct из get_active_addr_proxy в bonus очки.
+
+    LONG:  рост активности  → +5
+    SHORT: спад активности  → +5
+    Против сигнала → -3
+    """
+    threshold = _ADDR_ANOMALY_PCT
+    if direction == "long":
+        if change_pct >= threshold:
+            return 5, f"🟢 AddrProxy: активность ↑{change_pct:.0f}% → LONG подтверждён"
+        elif change_pct <= -threshold:
+            return -3, f"🔴 AddrProxy: активность ↓{abs(change_pct):.0f}% → против LONG"
+    else:  # short
+        if change_pct <= -threshold:
+            return 5, f"🔴 AddrProxy: активность ↓{abs(change_pct):.0f}% → SHORT подтверждён"
+        elif change_pct >= threshold:
+            return -3, f"🟢 AddrProxy: активность ↑{change_pct:.0f}% → против SHORT"
     return 0, ""

@@ -763,6 +763,22 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         except Exception:
             pass  # не критично
 
+        # ── #35: Active Addresses proxy (7-day volume delta) ─────────────────
+        _addr_bonus = 0
+        _addr_desc = ""
+        try:
+            if os.getenv("ENABLE_ONCHAIN", "true").lower() == "true":
+                from core.onchain_client import get_active_addr_proxy, addr_proxy_score_bonus
+                _redis_cli = state.redis.client if state.redis else None
+                _addr_pct, _addr_raw_desc = await asyncio.wait_for(
+                    get_active_addr_proxy(symbol, _redis_cli), timeout=8.0
+                )
+                _addr_bonus, _addr_desc = addr_proxy_score_bonus(_addr_pct, "short")
+                if verbose and _addr_desc:
+                    print(f"{log_prefix} 📊 [ADDR] {_addr_desc}")
+        except Exception:
+            pass  # не критично
+
         # MS-данные доступны вне блока verbose для сохранения в signal
         _ms_log = getattr(md, "market_structure", None)
 
@@ -869,15 +885,16 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             elif _cas_pre.score_bonus >= 10: _cas_pre_bonus = 7
             elif _cas_pre.score_bonus >= 8:  _cas_pre_bonus = 5
             elif _cas_pre.score_bonus >= 6:  _cas_pre_bonus = 3
-        effective_score = max(min(raw_score + fg_modifier + _mtf_bonus + _cas_pre_bonus + _onchain_bonus, 100), 0)
+        effective_score = max(min(raw_score + fg_modifier + _mtf_bonus + _cas_pre_bonus + _onchain_bonus + _addr_bonus, 100), 0)
         min_score       = state.scorer.min_score
 
         if verbose:
-            fg_str  = f" F&G={fg_modifier:+d}" if fg_modifier != 0 else ""
-            mtf_str = f" MTF={_mtf_bonus:+d}"  if _mtf_bonus  != 0 else ""
-            cas_str = f" CASCADE={_cas_pre_bonus:+d}" if _cas_pre_bonus > 0 else ""
-            oc_str  = f" ONCHAIN={_onchain_bonus:+d}" if _onchain_bonus != 0 else ""
-            print(f"{log_prefix} 📊 [BASE_SCORER] score={raw_score}{fg_str}{mtf_str}{cas_str}{oc_str} → {effective_score} (min={min_score})"
+            fg_str   = f" F&G={fg_modifier:+d}" if fg_modifier != 0 else ""
+            mtf_str  = f" MTF={_mtf_bonus:+d}"  if _mtf_bonus  != 0 else ""
+            cas_str  = f" CASCADE={_cas_pre_bonus:+d}" if _cas_pre_bonus > 0 else ""
+            oc_str   = f" ONCHAIN={_onchain_bonus:+d}" if _onchain_bonus != 0 else ""
+            addr_str = f" ADDR={_addr_bonus:+d}"       if _addr_bonus    != 0 else ""
+            print(f"{log_prefix} 📊 [BASE_SCORER] score={raw_score}{fg_str}{mtf_str}{cas_str}{oc_str}{addr_str} → {effective_score} (min={min_score})"
                   f" | components: {[(c.name, c.score) for c in base_result.components]}")
             if _cas_pre_bonus > 0:
                 print(f"{log_prefix} 🎯 [CASCADE PRE-GATE] +{_cas_pre_bonus}pts → помогает пройти gate")
