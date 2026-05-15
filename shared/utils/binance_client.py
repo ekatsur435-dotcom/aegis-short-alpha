@@ -223,6 +223,10 @@ class BinanceFuturesClient:
     _binance_symbols_last_update: float = 0.0
     BINANCE_SYMBOLS_TTL:        int   = 3600  # Обновляем whitelist каждый час
 
+    # Прокси-ротация: {proxy: failed_at_timestamp}
+    _dead_proxy_times: dict = {}
+    DEAD_PROXY_TTL: int = 300  # 5 мин cooldown на мёртвый прокси
+
     def __init__(self, api_key=None, api_secret=None):
         self.api_key = api_key or os.getenv("BINANCE_API_KEY", "")
         self.session: Optional[aiohttp.ClientSession] = None
@@ -235,11 +239,19 @@ class BinanceFuturesClient:
         self._okx_redis   = None   # Устанавливается ботом: client.set_redis(redis)
 
         proxy_env = os.getenv("PROXY_LIST", "")
-        self._proxies     = [p.strip() for p in proxy_env.split(",") if p.strip()]
+        raw_proxies = [p.strip() for p in proxy_env.split(",") if p.strip()]
+        # Дедупликация прокси (в списке могут быть повторы)
+        seen = set()
+        self._proxies = []
+        for p in raw_proxies:
+            if p not in seen:
+                seen.add(p)
+                self._proxies.append(p)
         self._proxy_idx   = 0
         self._active_proxy: Optional[str] = None
 
-        print(f"🔧 Market client v3.1: {'Binance+proxy' if self._try_binance else 'Bybit'} → OKX fallback")
+        print(f"🔧 Market client v3.1: {'Binance+proxy' if self._try_binance else 'Bybit'} → OKX fallback"
+              + (f" ({len(self._proxies)} proxies)" if self._proxies else ""))
 
     def _next_proxy(self) -> Optional[str]:
         if not self._proxies:
@@ -247,6 +259,31 @@ class BinanceFuturesClient:
         p = self._proxies[self._proxy_idx % len(self._proxies)]
         self._proxy_idx += 1
         return p
+
+    def _is_proxy_dead(self, proxy: str) -> bool:
+        failed_at = BinanceFuturesClient._dead_proxy_times.get(proxy, 0)
+        return time.time() - failed_at < self.DEAD_PROXY_TTL
+
+    def _mark_proxy_dead(self, proxy: str):
+        BinanceFuturesClient._dead_proxy_times[proxy] = time.time()
+        host = proxy.split('@')[-1] if '@' in proxy else proxy
+        logger.warning(f"[Proxy] ❌ {host} → недоступен, cooldown {self.DEAD_PROXY_TTL}s")
+        if self._active_proxy == proxy:
+            self._active_proxy = None
+
+    def _get_live_proxies(self) -> list:
+        """Живые прокси — активный первым, остальные в порядке списка."""
+        live = [p for p in self._proxies if not self._is_proxy_dead(p)]
+        if not live:
+            # Все мёртвые — сбрасываем cooldown и пробуем заново
+            BinanceFuturesClient._dead_proxy_times.clear()
+            logger.warning("[Proxy] Все прокси в cooldown — сбрасываем и пробуем заново")
+            live = self._proxies.copy()
+        # Активный первым (быстрый путь)
+        if self._active_proxy and self._active_proxy in live:
+            live.remove(self._active_proxy)
+            live.insert(0, self._active_proxy)
+        return live
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -282,7 +319,9 @@ class BinanceFuturesClient:
             print("✅ Data source: Bybit (default)")
             return
 
-        for proxy in self._proxies[:3]:
+        for proxy in self._proxies:  # пробуем все прокси, не только первые 3
+            if self._is_proxy_dead(proxy):
+                continue
             try:
                 session = await self._get_session()
                 async with session.get(
@@ -297,7 +336,10 @@ class BinanceFuturesClient:
                         host = proxy.split('@')[-1] if '@' in proxy else proxy
                         print(f"✅ Data source: Binance via proxy ({host})")
                         return
+                    # HTTP ошибка — прокси работает но Binance отвечает плохо
+                    break
             except Exception:
+                self._mark_proxy_dead(proxy)
                 continue
 
         self._use_binance = False
@@ -373,30 +415,47 @@ class BinanceFuturesClient:
 
     async def _binance(self, endpoint: str, params: Dict = None) -> Optional[Any]:
         await self._rate_limit()
-        proxy = self._active_proxy or self._next_proxy()
-        try:
-            session = await self._get_session()
-            async with session.get(
-                f"{self.BINANCE_URL}{endpoint}",
-                params=params or {},
-                proxy=proxy,
-                timeout=aiohttp.ClientTimeout(total=10),
-                ssl=False
-            ) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                # ── Логируем HTTP-ошибки с дедупликацией ────────────────────
-                if self._should_log_error(endpoint, params):
-                    logger.warning(
-                        f"[Binance] HTTP {resp.status} | {endpoint} | proxy={proxy} | params={params}"
-                    )
+        proxies = self._get_live_proxies()
+        if not proxies:
+            return None
+
+        for proxy in proxies:
+            try:
+                session = await self._get_session()
+                async with session.get(
+                    f"{self.BINANCE_URL}{endpoint}",
+                    params=params or {},
+                    proxy=proxy,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    ssl=False
+                ) as resp:
+                    if resp.status == 200:
+                        # Фиксируем рабочий прокси если сменился
+                        if proxy != self._active_proxy:
+                            host = proxy.split('@')[-1] if '@' in proxy else proxy
+                            logger.info(f"[Proxy] ✅ Активный прокси → {host}")
+                            self._active_proxy = proxy
+                        return await resp.json()
+                    # HTTP-ошибка (404, 400 и т.д.) — не вина прокси, выходим
+                    if self._should_log_error(endpoint, params):
+                        logger.warning(
+                            f"[Binance] HTTP {resp.status} | {endpoint} | proxy={proxy.split('@')[-1] if '@' in proxy else proxy}"
+                        )
+                    return None
+            except asyncio.TimeoutError:
+                logger.warning(f"[Binance] TIMEOUT | proxy={proxy.split('@')[-1] if '@' in proxy else proxy} | пробуем следующий")
+                self._mark_proxy_dead(proxy)
+                continue
+            except Exception as e:
+                err = str(e)
+                if any(kw in err for kw in ("Cannot connect", "Connection", "proxy", "tunnel")):
+                    self._mark_proxy_dead(proxy)
+                    continue
+                logger.warning(f"[Binance] ERROR | {endpoint} | {type(e).__name__}: {e}")
                 return None
-        except asyncio.TimeoutError:
-            logger.warning(f"[Binance] TIMEOUT | {endpoint} | proxy={proxy}")
-            return None
-        except Exception as e:
-            logger.warning(f"[Binance] ERROR | {endpoint} | proxy={proxy} | {type(e).__name__}: {e}")
-            return None
+
+        logger.warning(f"[Binance] Все прокси недоступны для {endpoint}")
+        return None
 
     # =========================================================================
     # OKX DIRECT (no proxy needed — globally accessible)
