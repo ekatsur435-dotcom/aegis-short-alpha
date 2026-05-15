@@ -152,11 +152,11 @@ services:
       - key: MAX_WATCHLIST
         value: "500"
       - key: MIN_LONG_SCORE
-        value: "72"           # AEGIS final threshold (было 70 → 72: режем маргинальные сигналы)
+        value: "72"           # AEGIS final threshold
       - key: MIN_LONG_BASE_SCORE
-        value: "50"           # BASE_SCORER порог (было 45 → 50: тверже фильтрует не-дно)
+        value: "60"           # BASE_SCORER порог
       - key: AEGIS_LONG_MIN_SCORE
-        value: "65"           # AEGIS engine внутренний порог (было 52-дефолт → 65: требует реального подтверждения dump exhaustion)
+        value: "65"           # AEGIS engine внутренний порог
       - key: SCAN_INTERVAL
         value: "180"          # Long чуть медленнее short
       - key: MAX_POSITIONS
