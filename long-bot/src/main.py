@@ -89,6 +89,8 @@ from detectors.dump_detector import DumpExhaustionDetector, DumpDetectorConfig
 from detectors.wyckoff_detector import WyckoffAccumulationDetector
 from detectors.bsl_scanner import BSLScanner
 from detectors.oi_analyzer_long import OIAnalyzerLong, FundingConfigLong
+from detectors.liquidation_mapper_long import LiquidationMapperLong
+from detectors.delta_analyzer_long import DeltaAnalyzerLong
 
 
 # ============================================================================
@@ -234,6 +236,8 @@ class BotState:
         self.bsl_scanner:         Optional[BSLScanner]              = None
         self.okx_ws_feed:         Optional[OKXLiquidationFeed]       = None
         self.oi_analyzer:         Optional[OIAnalyzerLong]          = None
+        self.liq_mapper:          Optional[LiquidationMapperLong]   = None
+        self.delta_analyzer:      Optional[DeltaAnalyzerLong]       = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100
         self.btc_change_1h:    Optional[float] = None  # ✅ FIX #5: кешируем BTC 1h для delta scorer
 
@@ -364,12 +368,16 @@ async def lifespan(app: FastAPI):
         binance_client=state.binance,
     ) if Config.ENABLE_OI_ANALYZER else None
 
+    state.liq_mapper = LiquidationMapperLong()
+    state.delta_analyzer = DeltaAnalyzerLong()
+
     state.signal_engine = AegisLongSignalEngine(
         dump_detector=state.dump_detector,
         oi_analyzer=state.oi_analyzer,
         bsl_scanner=state.bsl_scanner,
         wyckoff_detector=state.wyckoff_detector,
-        delta_analyzer=None,
+        delta_analyzer=state.delta_analyzer,
+        liq_mapper=state.liq_mapper,
         min_score=Config.AEGIS_MIN_SCORE,  # ✅ FIX: теперь читает AEGIS_LONG_MIN_SCORE (было MIN_LONG_SCORE=52)
     ) if Config.ENABLE_AEGIS_ENGINE else None
 
@@ -1283,7 +1291,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     base_score += smc.score_bonus
                     if verbose:
                         print(f"{log_prefix} ✅ [SMC] бонус +{smc.score_bonus:.1f} | has_ob={smc.has_ob}, has_fvg={smc.has_fvg}")
-                if smc.refined_sl and smc.refined_sl < price:
+                if smc.has_ob and smc.refined_sl and smc.refined_sl < price:
                     stop_loss = smc.refined_sl
                     if verbose:
                         print(f"{log_prefix} 🎯 [SMC] SL refined: {stop_loss:.4f}")

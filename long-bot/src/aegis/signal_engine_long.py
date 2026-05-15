@@ -109,6 +109,7 @@ class AegisLongSignalEngine:
         bsl_scanner=None,
         wyckoff_detector=None,
         delta_analyzer=None,
+        liq_mapper=None,
         min_score: float = 50.0,
     ):
         self.dump_detector    = dump_detector
@@ -116,6 +117,7 @@ class AegisLongSignalEngine:
         self.bsl_scanner      = bsl_scanner
         self.wyckoff_detector = wyckoff_detector
         self.delta_analyzer   = delta_analyzer
+        self.liq_mapper       = liq_mapper
         self.min_score        = min_score
 
     def _score_to_strength(self, score: float) -> SignalStrengthLong:
@@ -208,6 +210,20 @@ class AegisLongSignalEngine:
                 meta  = {"oi_4d": oi_4d, "ls_ratio": ls_ratio}
         except Exception as e:
             logger.warning(f"oi_long {symbol}: {e}"); score = 20.0
+
+        # LiquidationMapperLong: бонус за зоны short squeeze (кластеры шортов на дне)
+        if self.liq_mapper:
+            try:
+                lm = await self.liq_mapper.analyze(symbol, md)
+                lm_s = lm.get("score", 0)
+                if lm_s > 40:
+                    liq_bonus = min((lm_s - 40) * 0.5, 25)
+                    score = min(score + liq_bonus, 100)
+                    reasons.extend(lm.get("reasons", [])[:2])
+                    meta["liq_cluster_score"] = lm_s
+            except Exception:
+                pass
+
         return ComponentScoreLong("oi_change", score, self.WEIGHTS["oi_change"],
                                   score * self.WEIGHTS["oi_change"], reasons, meta)
 

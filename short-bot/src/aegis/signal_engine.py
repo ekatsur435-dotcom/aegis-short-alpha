@@ -207,6 +207,20 @@ class AegisSignalEngine:
                 meta  = {"oi_4d": oi_4d, "ls_ratio": ls_ratio}
         except Exception as e:
             logger.warning(f"oi_score {symbol}: {e}"); score = 20.0
+
+        # LiquidationMapper: бонус за кластеры ликвидаций лонгов выше текущей цены
+        if self.liq_mapper:
+            try:
+                lm = await self.liq_mapper.analyze(symbol, market_data)
+                lm_s = lm.get("score", 0)
+                if lm_s > 40:
+                    liq_bonus = min((lm_s - 40) * 0.5, 25)
+                    score = min(score + liq_bonus, 100)
+                    reasons.extend(lm.get("reasons", [])[:2])
+                    meta["liq_cluster_score"] = lm_s
+            except Exception:
+                pass
+
         return ComponentScore("oi_change", score, self.WEIGHTS["oi_change"],
                               score * self.WEIGHTS["oi_change"], reasons, meta)
 

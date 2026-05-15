@@ -1188,7 +1188,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     base_score += smc.score_bonus
                     if verbose:
                         print(f"{log_prefix} ✅ [SMC] бонус +{smc.score_bonus:.1f} | has_ob={smc.has_ob}, has_fvg={smc.has_fvg}")
-                if smc.refined_sl and smc.refined_sl > price:
+                if smc.has_ob and smc.refined_sl and smc.refined_sl > price:
                     stop_loss = smc.refined_sl
                     if verbose:
                         print(f"{log_prefix} 🎯 [SMC] SL refined: {stop_loss:.4f}")
