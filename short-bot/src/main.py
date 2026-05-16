@@ -226,6 +226,10 @@ class BotState:
         self.coinglass        = None
         self.liq_detector:    Optional[LiquidationZoneDetector] = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100, None = не загружен
+        # Signals DB + Trade Analytics
+        self.signals_db        = None
+        self._signal_db_map: dict = {}
+        self.trade_analytics   = None
 
 
 state = BotState()
@@ -391,6 +395,17 @@ async def lifespan(app: FastAPI):
     # ── Performance Tracker ──
     state.performance_tracker = PerformanceTracker(redis_client=state.redis)
 
+    # ── Signals DB + Trade Analytics (подключение PLAN2 файлов) ──
+    try:
+        from database.signals_db import get_signals_db
+        from database.trade_analytics import TradeAnalytics
+        _db_path = os.getenv("SIGNALS_DB_PATH", "/opt/render/project/signals_short.db")
+        state.signals_db      = get_signals_db(db_path=_db_path)
+        state.trade_analytics = TradeAnalytics(redis_client=state.redis)
+        print("✅ SignalsDB + TradeAnalytics: подключены")
+    except Exception as _e:
+        print(f"⚠️ SignalsDB init error: {_e}")
+
     print(f"✅ Aegis Engine: {'ON' if state.signal_engine else 'OFF'} | "
           f"DCA: {'ON' if state.dca_engine else 'OFF'} | "
           f"Risk: ✅ | Perf: ✅")
@@ -466,24 +481,62 @@ async def lifespan(app: FastAPI):
 
     # ── Position Tracker ──
     def _on_trade_closed(record: dict):
+        _sym      = record.get("symbol", "")
+        _pnl_pct  = float(record.get("pnl_pct", 0))
+        _capital  = float(os.getenv("ACCOUNT_CAPITAL_USD", "1000"))
+        _pnl_usd  = _pnl_pct * _capital / 100
+
+        # performance_tracker
         if state.performance_tracker:
             try:
                 from aegis.performance_tracker import TradeRecord
                 state.performance_tracker.record_trade(TradeRecord(
-                    symbol=record.get("symbol", ""),
+                    symbol=_sym,
                     direction=record.get("direction", "short"),
                     entry_price=float(record.get("entry_price", 0)),
                     exit_price=float(record.get("close_price", 0)),
                     entry_time=record.get("opened_at", ""),
                     exit_time=record.get("closed_at", ""),
-                    pnl_pct=float(record.get("pnl_pct", 0)),
-                    pnl_usd=float(record.get("pnl_pct", 0)) * float(os.getenv("ACCOUNT_CAPITAL_USD", "1000")) / 100,
-                    won=float(record.get("pnl_pct", 0)) > 0,
+                    pnl_pct=_pnl_pct,
+                    pnl_usd=_pnl_usd,
+                    won=_pnl_pct > 0,
                     exit_reason=record.get("close_type", ""),
                     score=float(record.get("score", 0)),
                     strength=record.get("strength", ""),
                 ))
-            except Exception as _e:
+            except Exception:
+                pass
+
+        # signals_db: закрываем запись сигнала с P&L
+        if state.signals_db:
+            try:
+                _sid = state._signal_db_map.pop(_sym, None)
+                if _sid:
+                    state.signals_db.close_signal(_sid, float(record.get("close_price", 0)), _pnl_pct, _pnl_usd)
+            except Exception:
+                pass
+
+        # trade_analytics: TP-уровень детализация
+        if state.trade_analytics:
+            try:
+                from database.trade_analytics import record_trade_with_tp
+                from datetime import datetime as _dt
+                _ct = record.get("close_type", "SL")
+                if _ct == "SL":        _tp_lvl = 0
+                elif _ct == "BE":      _tp_lvl = -1
+                elif _ct.startswith("TP"):
+                    _tp_lvl = int(_ct[2:]) if _ct[2:].isdigit() else 1
+                else:                  _tp_lvl = 1 if _pnl_pct > 0 else 0
+                record_trade_with_tp(
+                    redis_client=state.redis,
+                    symbol=_sym,
+                    direction=record.get("direction", "short"),
+                    entry_price=float(record.get("entry_price", 0)),
+                    exit_price=float(record.get("close_price", 0)),
+                    pnl_percent=_pnl_pct, pnl_usd=_pnl_usd,
+                    tp_level=_tp_lvl, timeframe="15m",
+                )
+            except Exception:
                 pass
 
     state.tracker = PositionTracker(
@@ -1070,11 +1123,18 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 base_score += 12  # Бонус за Upthrust
                 if verbose:
                     print(f"{log_prefix} ✅ [UPTHRUST] +12 — ложный пробой вверх")
-            
+
             if cons.has_breakout_down and cons.is_consolidating:
                 base_score += 8  # Бонус за пробой вниз
                 if verbose:
                     print(f"{log_prefix} ✅ [BREAKOUT] +8 — пробой консолидации")
+
+            # A1: Multi-touch бонус за подтверждённые уровни S/R
+            _touch_bonus = cons.get_touch_bonus("short")
+            if _touch_bonus > 0:
+                base_score += _touch_bonus
+                if verbose:
+                    print(f"{log_prefix} ✅ [MULTI-TOUCH] +{_touch_bonus} — resistance touches={cons.resistance_touches}")
         
         # ── SHORT-специфичные фильтры (сохраняем) ──
         sf   = get_short_filter()
@@ -1430,6 +1490,30 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         }
         
         print(f"🟢 [SIGNAL] {symbol}: score={final_score:.1f} grade={signal['grade']} — сигнал создан и отправлен в Telegram!")
+
+        # Сохранение сигнала в SQLite для истории P&L
+        if state.signals_db:
+            try:
+                from database.signals_db import SignalRecord
+                from datetime import datetime as _dt
+                _sid = state.signals_db.save_signal(SignalRecord(
+                    id=None, timestamp=_dt.utcnow(), symbol=symbol,
+                    direction="short", timeframe="15m",
+                    score=int(final_score), confidence=final_score / 100,
+                    entry_price=entry_price,
+                    oi_change=float(getattr(md, "oi_change_1h", 0) or 0),
+                    price_change=float(getattr(md, "price_change_1h", 0) or 0),
+                    volume_spike=float(getattr(md, "volume_spike_ratio", 1) or 1),
+                    recommended_sl=round(stop_loss, 8),
+                    recommended_tp=round(take_profits[0][0], 8) if take_profits else 0,
+                    leverage=int(os.getenv("SHORT_LEVERAGE", "10").split("-")[0]),
+                    pattern_name=patterns[0].name if patterns else "",
+                    bot_type="short",
+                ))
+                state._signal_db_map[symbol] = _sid
+            except Exception as _dbe:
+                pass
+
         return signal
 
     except Exception as e:

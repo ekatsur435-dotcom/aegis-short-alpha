@@ -1,0 +1,76 @@
+"""
+Aegis SystemicCrashGuard — A2
+Блокирует LONG позиции при системном краше рынка:
+  - BTC падает ≤ -SYSTEMIC_CRASH_BTC_PCT%/час (default -5%)
+  - 80%+ символов с отрицательной ценой за 1ч (alts breadth)
+"""
+from __future__ import annotations
+import os
+import logging
+from datetime import datetime, timedelta
+
+logger = logging.getLogger("aegis.systemic_crash_guard")
+
+_CRASH_BTC_PCT     = float(os.getenv("SYSTEMIC_CRASH_BTC_PCT",        "-5.0"))
+_CRASH_ALTS_RATIO  = float(os.getenv("SYSTEMIC_CRASH_ALTS_RATIO",      "0.80"))
+_CRASH_COOLDOWN_M  = int(os.getenv("SYSTEMIC_CRASH_COOLDOWN_MIN",       "30"))
+
+
+class SystemicCrashGuard:
+    """
+    Обновляется каждым scan_symbol:
+      update(symbol, price_change_1h) → накапливает статистику
+    В начале каждого скан-цикла вызывать reset_cycle().
+    is_crash() → True если рынок в системном сливе.
+    """
+
+    def __init__(self):
+        self._btc_change_1h:    float   = 0.0
+        self._cycle_neg:        int     = 0  # символов с отриц. 1h в цикле
+        self._cycle_total:      int     = 0  # всего символов в цикле
+        self._crash_until:      datetime | None = None  # до когда crash-режим
+        self._last_reason:      str     = ""
+
+    def reset_cycle(self):
+        """Сбросить счётчики альтов перед новым циклом скана."""
+        self._cycle_neg   = 0
+        self._cycle_total = 0
+
+    def update_btc(self, btc_change_1h: float):
+        self._btc_change_1h = btc_change_1h
+
+    def update_symbol(self, price_change_1h: float):
+        """Вызывать для каждого символа в scan loop."""
+        self._cycle_total += 1
+        if price_change_1h < 0:
+            self._cycle_neg += 1
+
+    def evaluate(self):
+        """Вычислить crash-режим по накопленным данным цикла. Вызывать после скана всего вотчлиста."""
+        btc_crash = self._btc_change_1h <= _CRASH_BTC_PCT
+        alts_ratio = self._cycle_neg / self._cycle_total if self._cycle_total > 0 else 0.0
+        alts_crash = alts_ratio >= _CRASH_ALTS_RATIO
+
+        if btc_crash or alts_crash:
+            self._crash_until = datetime.utcnow() + timedelta(minutes=_CRASH_COOLDOWN_M)
+            self._last_reason = (
+                f"BTC {self._btc_change_1h:+.1f}%/1H"
+                if btc_crash else
+                f"Alts {alts_ratio:.0%} negative"
+            )
+            logger.warning(
+                f"[SYSTEMIC CRASH] Обнаружен — {self._last_reason}. "
+                f"LONG заблокирован до {self._crash_until.strftime('%H:%M')} UTC"
+            )
+
+    def is_crash(self) -> bool:
+        if self._crash_until is None:
+            return False
+        if datetime.utcnow() < self._crash_until:
+            return True
+        self._crash_until = None
+        return False
+
+    @property
+    def reason(self) -> str:
+        return self._last_reason

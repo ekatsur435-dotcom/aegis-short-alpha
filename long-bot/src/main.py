@@ -82,6 +82,7 @@ from utils.okx_liquidation_ws import OKXLiquidationFeed
 
 # ── Aegis Long modules ──
 from aegis.signal_engine_long import AegisLongSignalEngine, SignalStrengthLong
+from aegis.systemic_crash_guard import SystemicCrashGuard
 from aegis.smart_dca_long import SmartDCALongEngine, GridConfigLong, GridTypeLong
 from aegis.risk_manager import AegisRiskManager, RiskLimits
 from aegis.performance_tracker import PerformanceTracker, TradeRecord
@@ -246,6 +247,12 @@ class BotState:
         self.liq_detector:        Optional[LiquidationZoneDetector] = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100
         self.btc_change_1h:    Optional[float] = None  # ✅ FIX #5: кешируем BTC 1h для delta scorer
+        # A2: SystemicCrashGuard
+        self.crash_guard:      SystemicCrashGuard      = SystemicCrashGuard()
+        # signals_db + trade_analytics
+        self.signals_db        = None
+        self._signal_db_map: dict = {}
+        self.trade_analytics   = None
 
 
 state = BotState()
@@ -413,6 +420,17 @@ async def lifespan(app: FastAPI):
     )
     state.performance_tracker = PerformanceTracker(redis_client=state.redis)
 
+    # ── Signals DB + Trade Analytics (подключение PLAN2 файлов) ──
+    try:
+        from database.signals_db import get_signals_db
+        from database.trade_analytics import TradeAnalytics
+        _db_path = os.getenv("SIGNALS_DB_PATH", "/opt/render/project/signals_long.db")
+        state.signals_db      = get_signals_db(db_path=_db_path)
+        state.trade_analytics = TradeAnalytics(redis_client=state.redis)
+        print("✅ SignalsDB + TradeAnalytics: подключены")
+    except Exception as _e:
+        print(f"⚠️ SignalsDB init error: {_e}")
+
     print(f"✅ Aegis Long Engine: {'ON' if state.signal_engine else 'OFF'} | "
           f"Wyckoff: {'ON' if state.wyckoff_detector else 'OFF'} | "
           f"BSL: {'ON' if state.bsl_scanner else 'OFF'}")
@@ -483,23 +501,59 @@ async def lifespan(app: FastAPI):
     state.last_scan  = datetime.utcnow()
 
     def _on_trade_closed(record: dict):
+        _sym      = record.get("symbol", "")
+        _pnl_pct  = float(record.get("pnl_pct", 0))
+        _capital  = float(os.getenv("ACCOUNT_CAPITAL_USD", "1000"))
+        _pnl_usd  = _pnl_pct * _capital / 100
+
+        # performance_tracker
         if state.performance_tracker:
             try:
                 from aegis.performance_tracker import TradeRecord
                 state.performance_tracker.record_trade(TradeRecord(
-                    symbol=record.get("symbol", ""),
+                    symbol=_sym,
                     direction=record.get("direction", "long"),
                     entry_price=float(record.get("entry_price", 0)),
                     exit_price=float(record.get("close_price", 0)),
                     entry_time=record.get("opened_at", ""),
                     exit_time=record.get("closed_at", ""),
-                    pnl_pct=float(record.get("pnl_pct", 0)),
-                    pnl_usd=float(record.get("pnl_pct", 0)) * float(os.getenv("ACCOUNT_CAPITAL_USD", "1000")) / 100,
-                    won=float(record.get("pnl_pct", 0)) > 0,
+                    pnl_pct=_pnl_pct, pnl_usd=_pnl_usd,
+                    won=_pnl_pct > 0,
                     exit_reason=record.get("close_type", ""),
                     score=float(record.get("score", 0)),
                     strength=record.get("strength", ""),
                 ))
+            except Exception:
+                pass
+
+        # signals_db: закрываем запись сигнала с P&L
+        if state.signals_db:
+            try:
+                _sid = state._signal_db_map.pop(_sym, None)
+                if _sid:
+                    state.signals_db.close_signal(_sid, float(record.get("close_price", 0)), _pnl_pct, _pnl_usd)
+            except Exception:
+                pass
+
+        # trade_analytics: TP-уровень детализация
+        if state.trade_analytics:
+            try:
+                from database.trade_analytics import record_trade_with_tp
+                _ct = record.get("close_type", "SL")
+                if _ct == "SL":        _tp_lvl = 0
+                elif _ct == "BE":      _tp_lvl = -1
+                elif _ct.startswith("TP"):
+                    _tp_lvl = int(_ct[2:]) if _ct[2:].isdigit() else 1
+                else:                  _tp_lvl = 1 if _pnl_pct > 0 else 0
+                record_trade_with_tp(
+                    redis_client=state.redis,
+                    symbol=_sym,
+                    direction=record.get("direction", "long"),
+                    entry_price=float(record.get("entry_price", 0)),
+                    exit_price=float(record.get("close_price", 0)),
+                    pnl_percent=_pnl_pct, pnl_usd=_pnl_usd,
+                    tp_level=_tp_lvl, timeframe="15m",
+                )
             except Exception:
                 pass
 
@@ -665,6 +719,12 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                             state._skip_nodata_set.add(symbol)
             except Exception:
                 pass
+            return None
+
+        # A2: SystemicCrashGuard — системный краш блокирует ВСЕ новые LONG
+        if state.crash_guard.is_crash():
+            if verbose:
+                print(f"{log_prefix} 🆘 [SYSTEMIC_CRASH] {state.crash_guard.reason} — LONG заблокирован")
             return None
 
         # ── BTC фильтр для LONG (критичный) ─────────────────────────
@@ -1148,11 +1208,18 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 base_score += 12  # Бонус за Spring
                 if verbose:
                     print(f"{log_prefix} ✅ [SPRING] +12 — ложный пробой вниз")
-            
+
             if cons.has_breakout_up and cons.is_consolidating:
                 base_score += 8  # Бонус за пробой
                 if verbose:
                     print(f"{log_prefix} ✅ [BREAKOUT] +8 — пробой консолидации")
+
+            # A1: Multi-touch бонус за подтверждённые уровни S/R
+            _touch_bonus = cons.get_touch_bonus("long")
+            if _touch_bonus > 0:
+                base_score += _touch_bonus
+                if verbose:
+                    print(f"{log_prefix} ✅ [MULTI-TOUCH] +{_touch_bonus} — support touches={cons.support_touches}")
         if verbose and (base_score != effective_score):
             print(f"{log_prefix} 📊 [POST_FILTERS] score={base_score:.1f} | reasons: {list(base_result.reasons)[:3]}")
 
@@ -1639,6 +1706,13 @@ async def scan_market():
     exchange_full = active_count >= Config.MAX_POSITIONS
     if exchange_full:
         print(f"📊 Exchange: {active_count}/{Config.MAX_POSITIONS} LONG slots — TG-only mode")
+
+    # A2: SystemicCrashGuard — оцениваем состояние рынка перед сканом
+    state.crash_guard.reset_cycle()
+    state.crash_guard.update_btc(_btc_cache_1h or 0.0)
+    state.crash_guard.evaluate()
+    if state.crash_guard.is_crash():
+        print(f"🆘 [SYSTEMIC_CRASH] {state.crash_guard.reason} — LONG скан пропущен до восстановления")
 
     new_signals = tg_only_count = 0
 
