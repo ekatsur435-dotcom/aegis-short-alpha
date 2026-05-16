@@ -130,17 +130,27 @@ class AutoTrader:
         symbol = signal.get("symbol", "?")
         score  = signal.get("score", 0)
         print(f"\n🚀 [AutoTrader] {symbol} | score={score:.1f}")
+        # FIX: extract max leverage from signal (e.g. "5-30".split("-")[1]=30 or int "20")
+        _sig_lev_raw = signal.get("leverage", "")
+        try:
+            if isinstance(_sig_lev_raw, str) and "-" in str(_sig_lev_raw):
+                _sig_lev = int(str(_sig_lev_raw).split("-")[1])
+            else:
+                _sig_lev = int(_sig_lev_raw) if _sig_lev_raw else 0
+        except (ValueError, IndexError):
+            _sig_lev = 0
         try:
             return await self.open_position(
-                symbol       = symbol,
-                direction    = signal["direction"],
-                entry_price  = signal["entry_price"],
-                stop_loss    = signal["stop_loss"],
-                take_profits = signal["take_profits"],
-                signal_score = signal["score"],
-                smc_data     = signal.get("smc"),
-                tg_msg_id    = signal.get("tg_msg_id"),
-                ms_context   = {k: signal[k] for k in signal if k.startswith("ms_")},
+                symbol           = symbol,
+                direction        = signal["direction"],
+                entry_price      = signal["entry_price"],
+                stop_loss        = signal["stop_loss"],
+                take_profits     = signal["take_profits"],
+                signal_score     = signal["score"],
+                signal_leverage  = _sig_lev,
+                smc_data         = signal.get("smc"),
+                tg_msg_id        = signal.get("tg_msg_id"),
+                ms_context       = {k: signal[k] for k in signal if k.startswith("ms_")},
             )
         except KeyError as e:
             print(f"❌ [AutoTrader] {symbol}: missing field {e}")
@@ -151,8 +161,8 @@ class AutoTrader:
             return None
 
     async def open_position(self, symbol, direction, entry_price, stop_loss,
-                            take_profits, signal_score, smc_data=None,
-                            tg_msg_id=None, ms_context=None) -> Optional[Dict]:
+                            take_profits, signal_score, signal_leverage=0,
+                            smc_data=None, tg_msg_id=None, ms_context=None) -> Optional[Dict]:
         mode = "DEMO" if self.config.demo_mode else "REAL"
         pfx  = f"[AT][{symbol}][{direction.upper()}]"
 
@@ -289,7 +299,7 @@ class AutoTrader:
             return None
 
         position_value = risk_amount / sl_distance
-        leverage       = self._calc_leverage(signal_score)
+        leverage       = self._calc_leverage(signal_score, signal_leverage)
         size           = position_value / entry_price
 
         # ── 7. Max notional cap ───────────────────────────────────────────────
@@ -522,9 +532,16 @@ class AutoTrader:
             return symbol[:-4] + "-USDT"
         return symbol
 
-    def _calc_leverage(self, score: float) -> int:
-        # ✅ v3.0: нет бонуса за высокий score — стабильный леверидж
-        return self.config.default_leverage
+    def _calc_leverage(self, score: float, signal_leverage: int = 0) -> int:
+        # FIX: score-based dynamic leverage within configured min/max range
+        # signal_leverage > 0 → use as ceiling (from signal config e.g. "5-30")
+        max_lev = signal_leverage if signal_leverage > 0 else self.config.max_leverage
+        max_lev = min(max_lev, self.config.max_leverage)
+        min_lev = self.config.min_leverage
+        # Score 65→min_lev, Score 100→max_lev, linear interpolation
+        normalized = max(0.0, min(1.0, (score - 65.0) / 35.0))
+        lev = int(min_lev + normalized * (max_lev - min_lev))
+        return max(min_lev, min(max_lev, lev))
 
     def _check_daily_reset(self):
         today = datetime.utcnow().date()
