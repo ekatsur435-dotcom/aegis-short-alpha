@@ -50,11 +50,11 @@ services:
       - key: AEGIS_SHORT_MIN_SCORE
         value: "60"          # AEGIS engine внутренний порог (аналог AEGIS_LONG_MIN_SCORE=65)
       - key: Z_VOLUME_GATE_MIN_SHORT
-        value: "8"           # BUG-2 FIX: было хардкод 15, выравниваем с LONG=8
+        value: "10"           # BUG-2 FIX: было хардкод 15, выравниваем с LONG=8
       - key: SCAN_INTERVAL
         value: "180"          # П8: было 180 → 120s
       - key: MAX_POSITIONS
-        value: "15"
+        value: "30"
       - key: SHORT_SL_BUFFER
         value: "2.5"
       - key: SHORT_LEVERAGE
@@ -108,7 +108,7 @@ services:
       - key: USE_SMC
         value: "true"
       - key: AUTO_TRADING_ENABLED
-        value: "false"
+        value: "true"
       - key: SKIP_NODATA_TTL
         value: "3600"           # 1ч skip вместо 24ч — быстрее восстановление после ошибок
       - key: COINMARKETCAP_API_KEY
@@ -223,7 +223,7 @@ services:
       - key: SCAN_INTERVAL
         value: "180"          # Long чуть медленнее short
       - key: MAX_POSITIONS
-        value: "15"
+        value: "30"
       - key: LONG_SL_BUFFER
         value: "3.0"
       - key: SWING_SL_MIN_PCT
@@ -251,7 +251,7 @@ services:
       - key: USE_ATR_SL
         value: "true"          # Использовать ATR для расчёта SL
       - key: Z_VOLUME_GATE_MIN
-        value: "8"             # Порог z_volume gate для LONG (default=8, adaptive→3 при системных условиях)
+        value: "10"             # Порог z_volume gate для LONG (default=8, adaptive→3 при системных условиях)
       - key: ENABLE_MOMENTUM_LONG
         value: "true"          # Bypass z_volume gate для momentum LONG
       - key: Z_GATE_NEAR_MISS_Z_MIN
@@ -297,7 +297,7 @@ services:
       - key: BTC_BLOCK_THRESHOLD
         value: "-2.0"         # было -3.0 → -2.0: блокируем лонги при умеренном падении BTC
       - key: AUTO_TRADING_ENABLED
-        value: "false"
+        value: "true"
       - key: SKIP_NODATA_TTL
         value: "3600"           # 1ч skip вместо 24ч
       - key: CONSOLIDATION_FILTER_ENABLED
