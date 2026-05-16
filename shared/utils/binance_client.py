@@ -924,8 +924,13 @@ class BinanceFuturesClient:
             items = result.get("list", [])
             if len(items) >= 2:
                 logger.debug(f"[OI] {symbol}: Bybit fallback ✅")
-                return [{"sumOpenInterest": float(item.get("openInterest", 0))}
-                        for item in items]
+                # ✅ FIX S9: Bybit возвращает newest-first (как и свечи).
+                # Разворачиваем → oldest-first, чтобы _analyze_oi_trend и get_oi_change
+                # корректно считали change_pct = (newest - oldest) / oldest.
+                return list(reversed([
+                    {"sumOpenInterest": float(item.get("openInterest", 0))}
+                    for item in items
+                ]))
 
         # ── 3. OKX direct fallback ────────────────────────────────────────────
         imap_okx = {"5m": "5m", "15m": "5m", "30m": "5m",   # OKX rubik min=5m

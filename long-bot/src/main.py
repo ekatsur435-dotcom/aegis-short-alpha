@@ -1812,9 +1812,10 @@ async def _watchlist_refresh_task():
                 state.binance, Config.MIN_VOLUME_USDT, Config.MAX_WATCHLIST
             )
             if new_wl:
+                old_set = set(state.watchlist or [])
+                added   = len(set(new_wl) - old_set)
+                removed = len(old_set - set(new_wl))
                 state.watchlist = new_wl
-                added   = len(set(new_wl) - set(state.watchlist or []))
-                removed = len(set(state.watchlist or []) - set(new_wl))
                 print(f"[WATCHLIST] ✅ Обновлён: {old_count} → {len(new_wl)} монет "
                       f"(+{added} новых, -{removed} убрано)")
             else:

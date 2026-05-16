@@ -36,6 +36,11 @@ _MOMENTUM_RSI_MIN     = float(os.getenv("MOMENTUM_RSI_MIN", "58"))           # R
 _MOMENTUM_VOL_MIN     = float(os.getenv("MOMENTUM_VOL_MIN", "1.8"))          # Volume spike мин
 # Extreme funding — когда шорты переплачивают критически → LONG (short squeeze сигнал)
 _FUNDING_EXTREME_LONG = float(os.getenv("FUNDING_EXTREME_LONG", "-0.05"))   # % за 8ч (отрицательное значение)
+# ✅ FIX #4: Extreme Funding LONG bypass — при экстремальном отрицательном funding
+#   шорты переплачивают настолько, что z_volume gate можно обойти (ALGOUSDT, CETUS тип)
+_ENABLE_EF_BYPASS_LONG  = os.getenv("ENABLE_EXTREME_FUNDING_BYPASS", "true").lower() == "true"
+_EF_THRESHOLD_LONG      = abs(float(os.getenv("EXTREME_FUNDING_BYPASS_THRESHOLD", "0.05")))  # 0.05 → |funding| ≥ 0.05%
+_EF_MIN_BASE_LONG       = float(os.getenv("EXTREME_FUNDING_BYPASS_MIN_BASE", "65"))          # base ≥ 65
 
 
 class SignalStrengthLong(Enum):
@@ -199,7 +204,7 @@ class AegisLongSignalEngine:
                 elif ls_ratio > 60:  score -= 3
 
                 # Wyckoff Spring bonus
-                if self.bsl_scanner and self.wyckoff_detector and ohlcv:
+                if self.wyckoff_detector and ohlcv:
                     try:
                         wy = await self.wyckoff_detector.analyze(symbol, ohlcv, md)
                         if wy.get("score", 0) > 50:
@@ -237,6 +242,19 @@ class AegisLongSignalEngine:
                     reasons.extend(nf.get("reasons", [])[:1])
                     meta["netflow_score"] = nf_s
                     meta["netflow_signal"] = nf.get("metadata", {}).get("signal", "")
+            except Exception:
+                pass
+
+        # BSLScanner: зоны Buy-Side Liquidity выше = магниты для LONG движения
+        if self.bsl_scanner and ohlcv:
+            try:
+                bsl = await self.bsl_scanner.analyze(symbol, md, ohlcv)
+                bsl_s = bsl.get("score", 0)
+                if bsl_s > 30:
+                    bsl_bonus = min((bsl_s - 30) * 0.5, 20)
+                    score = min(score + bsl_bonus, 100)
+                    reasons.extend(bsl.get("reasons", [])[:2])
+                    meta["bsl_score"] = bsl_s
             except Exception:
                 pass
 
@@ -447,6 +465,28 @@ class AegisLongSignalEngine:
                     # Бонус за momentum в score
                     if _p24h > 10: final_score = min(final_score + 10, 100)
                     elif _p24h > 5: final_score = min(final_score + 5, 100)
+
+            # ✅ FIX #4: Extreme Funding LONG bypass
+            # При экстремально отрицательном funding шорты переплачивают критически.
+            # Это сигнал накопления позиций — даже без dump exhaustion z_volume.
+            # Примеры из логов: ALGOUSDT funding=-0.0565% score=77 z=2 → REJECTED (убытки)
+            #                   CETUSUSDT score=95 z=2 → REJECTED, BANANAUSDT z=3 → REJECTED
+            if not _momentum_bypass and _ENABLE_EF_BYPASS_LONG:
+                _funding_ef = getattr(market_data, "funding_rate", 0.0) or 0.0
+                _pats_ef    = getattr(market_data, "patterns", [])       or []
+                _n_pats     = len(_pats_ef)
+                if (_funding_ef <= -_EF_THRESHOLD_LONG      # funding ≤ -0.05% (шорты переплачивают)
+                        and base_score >= _EF_MIN_BASE_LONG):  # база ≥ 65
+                    _momentum_bypass = True
+                    all_reasons.append(
+                        f"EXTREME FUNDING LONG bypass: funding={_funding_ef:.4f}% "
+                        f"pats={_n_pats} base={base_score:.0f}"
+                    )
+                    logger.info(
+                        f"[AEGIS EXTREME FUNDING LONG] {symbol}: z_volume={z_vol.raw_score:.0f} "
+                        f"< {_Z_VOLUME_GATE_MIN} → bypass (funding={_funding_ef:.4f}% "
+                        f"base={base_score:.0f})"
+                    )
 
             if not _momentum_bypass:
                 logger.info(
