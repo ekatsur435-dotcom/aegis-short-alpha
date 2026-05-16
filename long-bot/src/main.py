@@ -91,6 +91,7 @@ from detectors.bsl_scanner import BSLScanner
 from detectors.oi_analyzer_long import OIAnalyzerLong, FundingConfigLong
 from detectors.liquidation_mapper_long import LiquidationMapperLong
 from detectors.delta_analyzer_long import DeltaAnalyzerLong
+from detectors.netflow_analyzer import NetflowAnalyzerLong
 
 
 # ============================================================================
@@ -238,6 +239,7 @@ class BotState:
         self.oi_analyzer:         Optional[OIAnalyzerLong]          = None
         self.liq_mapper:          Optional[LiquidationMapperLong]   = None
         self.delta_analyzer:      Optional[DeltaAnalyzerLong]       = None
+        self.netflow_analyzer:    Optional[NetflowAnalyzerLong]     = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100
         self.btc_change_1h:    Optional[float] = None  # ✅ FIX #5: кешируем BTC 1h для delta scorer
 
@@ -370,6 +372,7 @@ async def lifespan(app: FastAPI):
 
     state.liq_mapper = LiquidationMapperLong()
     state.delta_analyzer = DeltaAnalyzerLong()
+    state.netflow_analyzer = NetflowAnalyzerLong() if os.getenv("COINGLASS_API_KEY") else None
 
     state.signal_engine = AegisLongSignalEngine(
         dump_detector=state.dump_detector,
@@ -378,6 +381,7 @@ async def lifespan(app: FastAPI):
         wyckoff_detector=state.wyckoff_detector,
         delta_analyzer=state.delta_analyzer,
         liq_mapper=state.liq_mapper,
+        netflow_analyzer=state.netflow_analyzer,
         min_score=Config.AEGIS_MIN_SCORE,  # ✅ FIX: теперь читает AEGIS_LONG_MIN_SCORE (было MIN_LONG_SCORE=52)
     ) if Config.ENABLE_AEGIS_ENGINE else None
 

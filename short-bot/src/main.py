@@ -327,7 +327,7 @@ async def lifespan(app: FastAPI):
     state.scorer           = get_short_scorer(_short_base_min)
     print(
         f"📐 Score thresholds: BASE_SCORER={_short_base_min} | "
-        f"AEGIS_ENGINE={Config.MIN_SCORE} | FINAL_FILTER={Config.MIN_SCORE}"
+        f"AEGIS_ENGINE={Config.AEGIS_MIN_SCORE} | FINAL_FILTER={Config.MIN_SCORE}"
     )
     state.pattern_detector = ShortPatternDetector()
     

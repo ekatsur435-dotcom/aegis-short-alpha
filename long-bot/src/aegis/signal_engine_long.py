@@ -110,6 +110,7 @@ class AegisLongSignalEngine:
         wyckoff_detector=None,
         delta_analyzer=None,
         liq_mapper=None,
+        netflow_analyzer=None,
         min_score: float = 50.0,
     ):
         self.dump_detector    = dump_detector
@@ -118,6 +119,7 @@ class AegisLongSignalEngine:
         self.wyckoff_detector = wyckoff_detector
         self.delta_analyzer   = delta_analyzer
         self.liq_mapper       = liq_mapper
+        self.netflow_analyzer = netflow_analyzer
         self.min_score        = min_score
 
     def _score_to_strength(self, score: float) -> SignalStrengthLong:
@@ -221,6 +223,20 @@ class AegisLongSignalEngine:
                     score = min(score + liq_bonus, 100)
                     reasons.extend(lm.get("reasons", [])[:2])
                     meta["liq_cluster_score"] = lm_s
+            except Exception:
+                pass
+
+        # NetflowAnalyzerLong: outflow с бирж = институциональное накопление = LONG
+        if self.netflow_analyzer:
+            try:
+                nf = await self.netflow_analyzer.analyze(symbol)
+                nf_s = nf.get("score", 40)
+                if nf_s > 55:
+                    nf_bonus = min((nf_s - 55) * 0.4, 18)
+                    score = min(score + nf_bonus, 100)
+                    reasons.extend(nf.get("reasons", [])[:1])
+                    meta["netflow_score"] = nf_s
+                    meta["netflow_signal"] = nf.get("metadata", {}).get("signal", "")
             except Exception:
                 pass
 
