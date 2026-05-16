@@ -174,6 +174,8 @@ services:
       # Signals DB
       - key: SIGNALS_DB_PATH
         value: "/opt/render/project/signals_short.db"
+      - key: SL_COOLDOWN_HOURS
+        value: "1.0"             # Блок повторного входа на символ после стопа (часов)
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
