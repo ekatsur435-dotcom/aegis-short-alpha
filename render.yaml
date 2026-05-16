@@ -227,11 +227,15 @@ services:
       - key: LONG_SL_BUFFER
         value: "3.0"
       - key: SWING_SL_MIN_PCT
-        value: "2.0"             # Swing SL не ближе 2% от входа (было 1.0 — слишком тесно)
+        value: "2.5"             # Увеличено 2.0→2.5: низколиквидные альты требуют запас
       - key: ATR_SL_MIN_PCT
-        value: "2.0"             # ATR SL не ближе 2% от входа (было 1.0)
+        value: "2.5"             # Увеличено 2.0→2.5
       - key: LONG_SL_HARD_MIN_PCT
-        value: "2.0"             # Абсолютный минимум SL от входа — защита от tight SL
+        value: "3.0"             # Увеличено 2.0→3.0: абсолютный минимум, защита от tight SL
+      - key: SL_COOLDOWN_HOURS
+        value: "1.0"             # Блок повторного входа на символ после стопа (часов)
+      - key: HTF_BEARISH_PENALTY
+        value: "5"               # Штраф −5 pts если 4H+1H оба медвежьи без подтверждения разворота
       - key: COINMARKETCAP_API_KEY
         sync: false  # ← Прописать в Render Dashboard
       - key: CRYPTOCOMPARE_API_KEY

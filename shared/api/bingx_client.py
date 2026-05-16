@@ -12,7 +12,11 @@ BingX Futures API Client  v2.4-final
 """
 
 import os, json, hmac, hashlib, time
-from typing import Optional, Dict, List, Any, Set
+from typing import Optional, Dict, List, Any, Set, Tuple
+
+# Кеш /openOrders: symbol → (timestamp, orders_list), TTL 30s
+_open_orders_cache: Dict[str, Tuple[float, List]] = {}
+_OPEN_ORDERS_CACHE_TTL = 30.0
 from dataclasses import dataclass
 from datetime import datetime
 import aiohttp
@@ -556,16 +560,23 @@ class BingXClient:
         """
         pfx = f"[BingX][update_sl][{symbol}][{position_side}]"
         try:
-            # ── 1. Получаем открытые ордера ───────────────────────────────────
-            open_orders_result = await self._make_request(
-                "GET", "/openApi/swap/v2/trade/openOrders",
-                params={"symbol": symbol}
-            )
-            open_orders = []
-            if open_orders_result and open_orders_result.get("code") == 0:
-                data = open_orders_result.get("data", {})
-                open_orders = data.get("orders", [])
-            print(f"{pfx} Открытых ордеров: {len(open_orders)}")
+            # ── 1. Получаем открытые ордера (с кешем 30s) ────────────────────
+            _now = time.time()
+            _cached = _open_orders_cache.get(symbol)
+            if _cached and (_now - _cached[0]) < _OPEN_ORDERS_CACHE_TTL:
+                open_orders = _cached[1]
+                print(f"{pfx} Открытых ордеров (кеш): {len(open_orders)}")
+            else:
+                open_orders_result = await self._make_request(
+                    "GET", "/openApi/swap/v2/trade/openOrders",
+                    params={"symbol": symbol}
+                )
+                open_orders = []
+                if open_orders_result and open_orders_result.get("code") == 0:
+                    data = open_orders_result.get("data", {})
+                    open_orders = data.get("orders", [])
+                    _open_orders_cache[symbol] = (_now, open_orders)
+                print(f"{pfx} Открытых ордеров: {len(open_orders)}")
 
             # ── 2. Отменяем все STOP_MARKET ордера нужной стороны ────────────
             cancelled = 0
