@@ -21,6 +21,7 @@ Pattern Detector v3.0 — ЕДИНЫЙ ФАЙЛ (Long + Short)
 
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+from core.fvg_detector import scan_fvg_zones  # A4: unified FVG
 
 
 # ============================================================================
@@ -166,6 +167,7 @@ class LongPatternDetector:
             self.detect_breaker_long,
             self.detect_fvg_long,
             self.detect_breakout_long,
+            self.detect_breakout_retest_long,   # #22: retest пробитого уровня
             self.detect_momentum_long,
             self.detect_liquidity_sweep_long,
             self.detect_consolidation_break_long,
@@ -440,70 +442,28 @@ class LongPatternDetector:
         )
 
     def detect_fvg_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
-        """FVG_LONG: Bullish Fair Value Gap — цена в зоне незаполненного гэпа (ICT поддержка).
-        3 свечи: c1 | c2(сильный бычий импульс) | c3. Гэп = c1.high < c3.low.
-        Вход когда цена возвращается в гэп (retest зоны поддержки).
-        """
+        """FVG_LONG: Bullish FVG — A4: делегируем в unified fvg_detector."""
         if len(candles) < 10:
             return None
-        atr_v = _atr(candles, 14)
-        if atr_v <= 0:
-            return None
-
         current_price = candles[-1].close
-        lookback = min(20, len(candles) - 2)
-        best = None
-
-        for i in range(len(candles) - lookback, len(candles) - 2):
-            c1 = candles[i]
-            c2 = candles[i + 1]
-            c3 = candles[i + 2]
-
-            # Средняя свеча — сильный бычий импульс
-            if c2.close <= c2.open:
-                continue
-            body2 = c2.close - c2.open
-            if body2 < atr_v * 1.2:
-                continue
-
-            # FVG: гэп между c1.high и c3.low
-            fvg_lo = c1.high
-            fvg_hi = c3.low
-            if fvg_hi <= fvg_lo:
-                continue
-
-            gap_pct = (fvg_hi - fvg_lo) / c2.close * 100
-            if gap_pct < 0.1:
-                continue
-
-            # Гэп ещё не заполнен (цена не возвращалась ниже c1.high)
-            filled = any(candles[j].low <= fvg_lo for j in range(i + 3, len(candles)))
-            if filled:
-                continue
-
-            # Цена в зоне гэпа или подходит снизу (буфер 2%)
-            if current_price < fvg_lo * 0.98:
-                continue
-            if current_price > fvg_hi * 1.005:
-                continue
-
-            dist = abs((fvg_lo + fvg_hi) / 2 - current_price)
-            if best is None or dist < best[0]:
-                best = (dist, fvg_lo, fvg_hi, gap_pct, body2)
-
-        if best is None:
+        zones = scan_fvg_zones(candles, "bullish", lookback=20,
+                               require_impulse=True, impulse_atr_min=1.2)
+        if not zones:
             return None
-
-        _, fvg_lo, fvg_hi, gap_pct, body2 = best
-        bonus = min(22, int(14 + gap_pct * 4))
+        z = zones[0]
+        # Цена должна быть в зоне гэпа (буфер 2%)
+        if current_price < z.lower * 0.98 or current_price > z.upper * 1.005:
+            return None
+        atr_v = _atr(candles, 14)
+        bonus = min(22, int(14 + z.gap_pct * 4))
         return PatternResult(
             name="FVG_LONG", score_bonus=bonus,
-            confidence=min(0.80, 0.58 + gap_pct * 0.08),
+            confidence=min(0.80, 0.58 + z.gap_pct * 0.08),
             direction="long",
-            suggested_sl_pct=round((current_price - fvg_lo * 0.995) / current_price * 100 + 0.2, 2),
+            suggested_sl_pct=round((current_price - z.lower * 0.995) / current_price * 100 + 0.2, 2),
             reasons=[
-                f"📊 Bullish FVG [{fvg_lo:.6f} – {fvg_hi:.6f}] ({gap_pct:.2f}%)",
-                f"Импульс {body2 / atr_v:.1f}×ATR | Незаполненный гэп = поддержка",
+                f"📊 Bullish FVG [{z.lower:.6f} – {z.upper:.6f}] ({z.gap_pct:.2f}%)",
+                f"Импульс {z.impulse_atr_mult:.1f}×ATR | Незаполненный гэп = поддержка",
             ],
         )
 
@@ -534,6 +494,54 @@ class LongPatternDetector:
             suggested_sl_pct=round((last.close - low_cons) / last.close * 100, 2),
             reasons=[f"Breakout выше {high_cons:.4f} (флэт {cons_range:.1f}%)",
                      f"Volume spike {vol_spike:.1f}x | +{breakout_pct:.2f}%"],
+        )
+
+    def detect_breakout_retest_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """#22 BREAKOUT_RETEST_LONG: импульс вверх → пробой уровня → ретест пробитого уровня → LONG.
+        Логика: консолидация → пробой (close > high_cons) → откат к high_cons ±0.5% → подтверждение.
+        """
+        if len(candles) < 30:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+        # Зона консолидации (свечи -30..-12)
+        cons_zone = candles[-30:-12]
+        high_cons = max(c.high for c in cons_zone)
+        low_cons  = min(c.low  for c in cons_zone)
+        range_pct = (high_cons - low_cons) / low_cons * 100 if low_cons else 999
+        if range_pct > 4.0:  # Флэт максимум 4%
+            return None
+        # Импульс пробоя (свечи -12..-4): закрытие выше high_cons + volume spike
+        breakout_zone = candles[-12:-4]
+        max_close_bo  = max(c.close for c in breakout_zone)
+        if max_close_bo <= high_cons * 1.003:  # Пробой должен быть ≥0.3%
+            return None
+        vol_spike = _vol_spike(candles[-12:-4] + candles[-4:], 8)
+        # Ретест (последние 4 свечи): цена возвращается к high_cons ±0.5%
+        retest_candles = candles[-4:]
+        min_close_rt   = min(c.low for c in retest_candles)
+        if min_close_rt > high_cons * 1.005 or min_close_rt < high_cons * 0.995:
+            return None  # Нет ретеста уровня
+        # Подтверждение: последняя свеча закрывается выше high_cons
+        last = candles[-1]
+        if last.close <= high_cons:
+            return None
+        rng  = last.high - last.low
+        bull = (last.close - last.open) / rng > 0.5 if rng > 0 else False
+        if not bull:
+            return None
+        breakout_pct = (max_close_bo - high_cons) / high_cons * 100
+        bonus = min(28, int(12 + breakout_pct * 3 + vol_spike * 2))
+        return PatternResult(
+            name="BREAKOUT_RETEST_LONG", score_bonus=bonus,
+            confidence=min(0.88, 0.60 + breakout_pct * 0.05),
+            direction="long",
+            suggested_sl_pct=round((last.close - low_cons) / last.close * 100 + 0.3, 2),
+            reasons=[
+                f"🔄 Breakout retest зоны {high_cons:.6f} (флэт {range_pct:.1f}%)",
+                f"Пробой +{breakout_pct:.2f}% → ретест → подтверждение | vol×{vol_spike:.1f}",
+            ],
         )
 
     def detect_momentum_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
@@ -918,6 +926,7 @@ class ShortPatternDetector:
             self.detect_breaker_short,
             self.detect_fvg_short,
             self.detect_breakout_short,
+            self.detect_breakout_retest_short,  # #22: retest пробитого уровня
             self.detect_momentum_short,
             self.detect_liquidity_sweep_short,
             self.detect_distribution_break,
@@ -1184,70 +1193,27 @@ class ShortPatternDetector:
         )
 
     def detect_fvg_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
-        """FVG_SHORT: Bearish Fair Value Gap — цена в зоне незаполненного гэпа (ICT сопротивление).
-        3 свечи: c1 | c2(сильный медвежий импульс) | c3. Гэп = c3.high < c1.low.
-        Вход когда цена возвращается в гэп (retest зоны сопротивления).
-        """
+        """FVG_SHORT: Bearish FVG — A4: делегируем в unified fvg_detector."""
         if len(candles) < 10:
             return None
-        atr_v = _atr(candles, 14)
-        if atr_v <= 0:
-            return None
-
         current_price = candles[-1].close
-        lookback = min(20, len(candles) - 2)
-        best = None
-
-        for i in range(len(candles) - lookback, len(candles) - 2):
-            c1 = candles[i]
-            c2 = candles[i + 1]
-            c3 = candles[i + 2]
-
-            # Средняя свеча — сильный медвежий импульс
-            if c2.close >= c2.open:
-                continue
-            body2 = c2.open - c2.close
-            if body2 < atr_v * 1.2:
-                continue
-
-            # FVG: гэп между c3.high и c1.low (медвежий разрыв)
-            fvg_lo = c3.high
-            fvg_hi = c1.low
-            if fvg_hi <= fvg_lo:
-                continue
-
-            gap_pct = (fvg_hi - fvg_lo) / c2.close * 100
-            if gap_pct < 0.1:
-                continue
-
-            # Гэп ещё не заполнен (цена не вернулась выше c1.low)
-            filled = any(candles[j].high >= fvg_hi for j in range(i + 3, len(candles)))
-            if filled:
-                continue
-
-            # Цена в зоне гэпа или подходит снизу (буфер 2%)
-            if current_price > fvg_hi * 1.02:
-                continue
-            if current_price < fvg_lo * 0.995:
-                continue
-
-            dist = abs((fvg_lo + fvg_hi) / 2 - current_price)
-            if best is None or dist < best[0]:
-                best = (dist, fvg_lo, fvg_hi, gap_pct, body2)
-
-        if best is None:
+        zones = scan_fvg_zones(candles, "bearish", lookback=20,
+                               require_impulse=True, impulse_atr_min=1.2)
+        if not zones:
             return None
-
-        _, fvg_lo, fvg_hi, gap_pct, body2 = best
-        bonus = min(22, int(14 + gap_pct * 4))
+        z = zones[0]
+        # Цена должна быть в зоне гэпа (буфер 2%)
+        if current_price > z.upper * 1.02 or current_price < z.lower * 0.995:
+            return None
+        bonus = min(22, int(14 + z.gap_pct * 4))
         return PatternResult(
             name="FVG_SHORT", score_bonus=bonus,
-            confidence=min(0.80, 0.58 + gap_pct * 0.08),
+            confidence=min(0.80, 0.58 + z.gap_pct * 0.08),
             direction="short",
-            suggested_sl_pct=round((fvg_hi * 1.005 - current_price) / current_price * 100 + 0.2, 2),
+            suggested_sl_pct=round((z.upper * 1.005 - current_price) / current_price * 100 + 0.2, 2),
             reasons=[
-                f"📊 Bearish FVG [{fvg_lo:.6f} – {fvg_hi:.6f}] ({gap_pct:.2f}%)",
-                f"Импульс {body2 / atr_v:.1f}×ATR | Незаполненный гэп = сопротивление",
+                f"📊 Bearish FVG [{z.lower:.6f} – {z.upper:.6f}] ({z.gap_pct:.2f}%)",
+                f"Импульс {z.impulse_atr_mult:.1f}×ATR | Незаполненный гэп = сопротивление",
             ],
         )
 
@@ -1278,6 +1244,51 @@ class ShortPatternDetector:
             suggested_sl_pct=round((high_cons - last.close) / last.close * 100, 2),
             reasons=[f"Пробой ниже {low_cons:.4f} (флэт {r_pct:.1f}%)",
                      f"Volume spike {vol_spike:.1f}x | -{breakdown_pct:.2f}%"],
+        )
+
+    def detect_breakout_retest_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """#22 BREAKOUT_RETEST_SHORT: импульс вниз → пробой поддержки → ретест → SHORT."""
+        if len(candles) < 30:
+            return None
+        atr_v = _atr(candles, 14)
+        if atr_v <= 0:
+            return None
+        cons_zone = candles[-30:-12]
+        high_cons = max(c.high for c in cons_zone)
+        low_cons  = min(c.low  for c in cons_zone)
+        range_pct = (high_cons - low_cons) / low_cons * 100 if low_cons else 999
+        if range_pct > 4.0:
+            return None
+        # Импульс пробоя вниз
+        breakout_zone = candles[-12:-4]
+        min_close_bo  = min(c.close for c in breakout_zone)
+        if min_close_bo >= low_cons * 0.997:  # Пробой ≥0.3% вниз
+            return None
+        vol_spike = _vol_spike(candles[-12:-4] + candles[-4:], 8)
+        # Ретест: цена возвращается к low_cons ±0.5% снизу
+        retest_candles = candles[-4:]
+        max_high_rt    = max(c.high for c in retest_candles)
+        if max_high_rt < low_cons * 0.995 or max_high_rt > low_cons * 1.005:
+            return None
+        # Подтверждение: последняя свеча закрывается ниже low_cons
+        last = candles[-1]
+        if last.close >= low_cons:
+            return None
+        rng  = last.high - last.low
+        bear = (last.open - last.close) / rng > 0.5 if rng > 0 else False
+        if not bear:
+            return None
+        breakdown_pct = (low_cons - min_close_bo) / low_cons * 100
+        bonus = min(28, int(12 + breakdown_pct * 3 + vol_spike * 2))
+        return PatternResult(
+            name="BREAKOUT_RETEST_SHORT", score_bonus=bonus,
+            confidence=min(0.88, 0.60 + breakdown_pct * 0.05),
+            direction="short",
+            suggested_sl_pct=round((high_cons - last.close) / last.close * 100 + 0.3, 2),
+            reasons=[
+                f"🔄 Breakdown retest зоны {low_cons:.6f} (флэт {range_pct:.1f}%)",
+                f"Пробой −{breakdown_pct:.2f}% → ретест → подтверждение | vol×{vol_spike:.1f}",
+            ],
         )
 
     def detect_momentum_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
