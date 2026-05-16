@@ -161,6 +161,9 @@ services:
         value: "2.5"            # Мин 1D движение % (proxy из 6×4H)
       - key: TREND_VOLUME_MULT
         value: "1.3"            # Мин volume surge ×
+      # Signals DB
+      - key: SIGNALS_DB_PATH
+        value: "/opt/render/project/signals_short.db"
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
@@ -309,3 +312,13 @@ services:
         value: "2.5"
       - key: TREND_VOLUME_MULT
         value: "1.3"
+      # SystemicCrashGuard (A2)
+      - key: SYSTEMIC_CRASH_BTC_PCT
+        value: "-5.0"           # BTC ≤ -5%/1h → системный краш
+      - key: SYSTEMIC_CRASH_ALTS_RATIO
+        value: "0.80"           # 80%+ альтов с отрицательной 1h → краш
+      - key: SYSTEMIC_CRASH_COOLDOWN_MIN
+        value: "30"             # Блокировка LONG на 30 мин после краша
+      # Signals DB
+      - key: SIGNALS_DB_PATH
+        value: "/opt/render/project/signals_long.db"
