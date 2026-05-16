@@ -111,7 +111,7 @@ class Config:
     SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "240"))    # Long = медленнее
     MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "12"))
 
-    MIN_SCORE     = int(os.getenv("MIN_LONG_SCORE", "52"))   # Снижено с 60: новая blend-формула (70% base) даёт ~45-55 при base=58
+    MIN_SCORE     = int(os.getenv("MIN_LONG_SCORE", "72"))   # FIX: default выровнен с render.yaml (было 52 — расхождение 20 пунктов)
     SL_BUFFER     = float(os.getenv("LONG_SL_BUFFER", "2.5"))  # ✅ FIX v17: 3.0→2.5% (TP1 теперь выше)
     LEVERAGE      = os.getenv("LONG_LEVERAGE", "5-20")
 
@@ -174,7 +174,7 @@ class Config:
     MOMENTUM_SCORE_THRESHOLD = int(os.getenv("MOMENTUM_SCORE_THRESHOLD", "58"))
 
     # ✅ FIX: AEGIS_LONG_MIN_SCORE — реальный порог Aegis engine (был мёртвым ENV, теперь работает)
-    AEGIS_MIN_SCORE    = int(os.getenv("AEGIS_LONG_MIN_SCORE", "52"))
+    AEGIS_MIN_SCORE    = int(os.getenv("AEGIS_LONG_MIN_SCORE", "65"))  # FIX: default выровнен с render.yaml (было 52)
 
     # ✅ FIX: Adaptive threshold ceiling — max +N от MIN_LONG_BASE_SCORE (было хардкод 78)
     ADAPTIVE_MAX_BOOST = int(os.getenv("ADAPTIVE_MAX_BOOST", "3"))
@@ -773,6 +773,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             except Exception:
                 pass
             return None
+
+        # A2: CrashGuard — регистрируем символ для alts breadth (FIX: было пропущено)
+        state.crash_guard.update_symbol(getattr(md, "price_change_1h", 0.0) or 0.0)
 
         # A2: SystemicCrashGuard — системный краш блокирует ВСЕ новые LONG
         if state.crash_guard.is_crash():
@@ -1569,7 +1572,12 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         risk_result = None
         if state.risk_manager:
             try:
+                # FIX: real win_rate from risk_manager history (was default 0.60)
+                _rm_stats = state.risk_manager.get_win_stats()
+                _real_wr  = _rm_stats.get("win_rate", 0.0) if _rm_stats.get("total_trades", 0) >= 10 else 0.55
+                _real_awp = _rm_stats.get("avg_win_pct", 5.0) or 5.0
                 risk_result = state.risk_manager.calculate_position_size(
+                    win_rate=_real_wr, avg_win_pct=_real_awp,
                     signal_score=final_score, sl_pct=sl_pct,
                 )
                 if verbose and risk_result:
@@ -1799,12 +1807,10 @@ async def scan_market():
     if exchange_full:
         print(f"📊 Exchange: {active_count}/{Config.MAX_POSITIONS} LONG slots — TG-only mode")
 
-    # A2: SystemicCrashGuard — оцениваем состояние рынка перед сканом
+    # A2: SystemicCrashGuard — сбрасываем счётчики перед сканом, BTC обновляем
     state.crash_guard.reset_cycle()
     state.crash_guard.update_btc(_btc_cache_1h or 0.0)
-    state.crash_guard.evaluate()
-    if state.crash_guard.is_crash():
-        print(f"🆘 [SYSTEMIC_CRASH] {state.crash_guard.reason} — LONG скан пропущен до восстановления")
+    # NOTE: evaluate() вызывается ПОСЛЕ prefetch — чтобы собрать update_symbol() по всем символам
 
     new_signals = tg_only_count = 0
 
@@ -1829,6 +1835,11 @@ async def scan_market():
     _dt = (datetime.utcnow() - _t0).total_seconds()
     print(f"⚡ Parallel fetch: {len(state.watchlist)} symbols in {_dt:.1f}s")
     _prefetch_map = dict(_prefetch_results)
+
+    # A2: FIX — evaluate() ПОСЛЕ prefetch: теперь _cycle_neg/_cycle_total заполнены
+    state.crash_guard.evaluate()
+    if state.crash_guard.is_crash():
+        print(f"🆘 [SYSTEMIC_CRASH] {state.crash_guard.reason} — LONG сигналы заблокированы до восстановления")
 
     for symbol in state.watchlist:
         try:

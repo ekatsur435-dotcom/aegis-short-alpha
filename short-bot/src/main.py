@@ -24,7 +24,6 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
-from decimal import Decimal
 
 # Настройка логирования — INFO уровень для видимости fallback логов
 logging.basicConfig(
@@ -110,7 +109,7 @@ class Config:
     SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "180"))
     MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "12"))
 
-    MIN_SCORE     = int(os.getenv("MIN_SHORT_SCORE", "55"))  # Снижено с 60: новая blend-формула (70% base) даёт ~55-65 при base=60
+    MIN_SCORE     = int(os.getenv("MIN_SHORT_SCORE", "65"))  # FIX: default выровнен с render.yaml (было 55 — расхождение 10 пунктов)
     SL_BUFFER     = float(os.getenv("SHORT_SL_BUFFER", "2.0"))  # ✅ FIX v17: 2.5→2.0% для RR≥1.5
     LEVERAGE      = os.getenv("SHORT_LEVERAGE", "5-30")
 
@@ -157,7 +156,7 @@ class Config:
     ATR_SL_MAX  = float(os.getenv("ATR_SL_MAX_PCT", "4.0"))
 
     # ✅ FIX: AEGIS_SHORT_MIN_SCORE — реальный порог Aegis engine (аналог LONG бота)
-    AEGIS_MIN_SCORE      = int(os.getenv("AEGIS_SHORT_MIN_SCORE", "55"))
+    AEGIS_MIN_SCORE      = int(os.getenv("AEGIS_SHORT_MIN_SCORE", "60"))  # FIX: default выровнен с render.yaml (было 55)
     # ✅ FIX: Adaptive threshold ceiling — max +N от MIN_SHORT_BASE_SCORE
     ADAPTIVE_MAX_BOOST   = int(os.getenv("ADAPTIVE_MAX_BOOST", "3"))
     # ✅ FIX: MOMENTUM SHORT порог (аналог LONG бота)
@@ -1458,9 +1457,13 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         if state.risk_manager:
             try:
                 open_usd = state.risk_manager.capital * 0.2  # Approximation
+                # FIX: real win_rate from performance tracker (was hardcoded 0.62)
+                _perf_stats = state.performance_tracker.get_stats(7) if state.performance_tracker else {}
+                _real_wr    = _perf_stats.get("win_rate", 0.0) if _perf_stats.get("total_trades", 0) >= 10 else 0.55
+                _real_awp   = _perf_stats.get("avg_win_pct", 5.0) or 5.0
                 risk_result = state.risk_manager.calculate_position_size(
-                    win_rate=0.62,
-                    avg_win_pct=5.0,
+                    win_rate=_real_wr,
+                    avg_win_pct=_real_awp,
                     avg_loss_pct=Config.SL_BUFFER,
                     signal_score=final_score,
                     sl_pct=sl_pct,
