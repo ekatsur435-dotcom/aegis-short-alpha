@@ -388,6 +388,18 @@ class AegisSignalEngine:
 
         final_score = total_weighted  # веса = 1.0, raw_score 0-100
 
+        # OI + Funding COMBO: одновременные экстремумы усиливают сигнал
+        _oi_c   = components.get("oi_change")
+        _fund_c = components.get("funding_rate")
+        if _oi_c and _fund_c and _oi_c.raw_score >= 65 and _fund_c.raw_score >= 65:
+            _avg = (_oi_c.raw_score + _fund_c.raw_score) / 2
+            _combo_bonus = round(min((_avg - 60) * 0.3, 12), 1)
+            final_score = min(final_score + _combo_bonus, 100)
+            all_reasons.append(
+                f"⚡ OI+Funding COMBO +{_combo_bonus:.1f}pts "
+                f"(OI={_oi_c.raw_score:.0f} Fund={_fund_c.raw_score:.0f})"
+            )
+
         # HARD GATE: z_volume — главный индикатор SHORT (памп/перекупленность).
         # ✅ FIX: порог читается из ENV Z_VOLUME_GATE_MIN_SHORT (было хардкод 15)
         # ✅ Momentum SHORT bypass: при сильном даунтренде + volume spike обходим gate.

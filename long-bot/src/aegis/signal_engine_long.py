@@ -405,6 +405,18 @@ class AegisLongSignalEngine:
 
         final_score = total_weighted
 
+        # OI + Funding COMBO: одновременные экстремумы усиливают LONG сигнал
+        _oi_c   = components.get("oi_change")
+        _fund_c = components.get("funding_rate")
+        if _oi_c and _fund_c and _oi_c.raw_score >= 65 and _fund_c.raw_score >= 65:
+            _avg = (_oi_c.raw_score + _fund_c.raw_score) / 2
+            _combo_bonus = round(min((_avg - 60) * 0.3, 12), 1)
+            final_score = min(final_score + _combo_bonus, 100)
+            all_reasons.append(
+                f"⚡ OI+Funding COMBO +{_combo_bonus:.1f}pts "
+                f"(OI={_oi_c.raw_score:.0f} Fund={_fund_c.raw_score:.0f})"
+            )
+
         # GATE: z_volume — главный индикатор mean-reversion LONG.
         # Порог настраивается через ENV Z_VOLUME_GATE_MIN (default=8, было 20).
         # ✅ v2.1: Momentum LONG bypass — если RSI растущий + volume spike + тренд вверх,
