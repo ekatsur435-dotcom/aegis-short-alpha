@@ -79,6 +79,15 @@ def _vol_spike(candles, lookback: int = 20) -> float:
         return 1.0
     return candles[-1].quote_volume / avg
 
+def _vwap(candles, lookback: int = 20) -> float:
+    """Volume-Weighted Average Price over last `lookback` candles."""
+    subset = candles[-lookback:] if len(candles) >= lookback else candles
+    total_vol = sum(c.quote_volume for c in subset)
+    if total_vol <= 0:
+        return subset[-1].close if subset else 0.0
+    typical = [(c.high + c.low + c.close) / 3 * c.quote_volume for c in subset]
+    return sum(typical) / total_vol
+
 def _atr(candles, period: int = 14) -> float:
     if len(candles) < period + 1:
         return 0.0
@@ -161,6 +170,7 @@ class LongPatternDetector:
             self.detect_liquidity_sweep_long,
             self.detect_consolidation_break_long,
             self.detect_wyckoff_spring,
+            self.detect_wyckoff_sos_lps,
             self.detect_mega_long,
             self.detect_trap_short,
             self.detect_rejection_long,
@@ -550,11 +560,16 @@ class LongPatternDetector:
             return None
         pct_move = (last.close - last.open) / last.open * 100 if last.open else 0
         bonus    = min(20, int(12 + vol_spike * 1.5))
+        reasons  = [f"Momentum свеча +{pct_move:.2f}% | Volume {vol_spike:.1f}x avg"]
+        vwap_val = _vwap(candles, 20)
+        if vwap_val > 0 and last.close > vwap_val:
+            bonus = min(bonus + 3, 20)
+            reasons.append(f"Цена выше VWAP {vwap_val:.4f} — подтверждение импульса")
         return PatternResult(
             name="MOMENTUM_LONG", score_bonus=bonus,
             confidence=min(0.85, 0.55 + vol_spike * 0.08), direction="long",
             suggested_sl_pct=round((last.close - last.open) / last.close * 100, 2),
-            reasons=[f"Momentum свеча +{pct_move:.2f}% | Volume {vol_spike:.1f}x avg"],
+            reasons=reasons,
         )
 
     def detect_liquidity_sweep_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
@@ -663,6 +678,81 @@ class LongPatternDetector:
             reasons=[f"Wyckoff Spring: диапазон {r_pct:.1f}%",
                      f"Spring -{spring_depth:.2f}% ниже поддержки",
                      "Объём в норме — ложный пробой"],
+        )
+
+    def detect_wyckoff_sos_lps(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """WYCKOFF_SOS_LPS: Sign of Strength (пробой сопротивления с объёмом) +
+        Last Point of Support (откат к пробитому уровню на меньшем объёме).
+        Phase D — подтверждённое институциональное накопление, лучший вход в LONG.
+        """
+        if len(candles) < 30:
+            return None
+        acc    = candles[-30:-5]
+        recent = candles[-7:]
+        last   = candles[-1]
+
+        r_high = max(c.high for c in acc)
+        r_low  = min(c.low  for c in acc)
+        r_pct  = (r_high - r_low) / r_low * 100 if r_low else 999
+        if not (1.5 < r_pct < 30.0):
+            return None
+
+        # Цена не должна быть в верхних 30% диапазона (SOS уже давно прошёл)
+        range_pos = (last.close - r_low) / (r_high - r_low) if (r_high - r_low) > 0 else 1.0
+        if range_pos > 0.85:
+            return None
+
+        vols = [c.quote_volume for c in recent]
+        avg_vol = sum(vols) / len(vols) if vols else 1
+
+        sos_idx = None
+        sos_vol_ratio = 0.0
+        for i, c in enumerate(recent):
+            if c.close > r_high:
+                vol_ratio = c.quote_volume / avg_vol if avg_vol > 0 else 1
+                if vol_ratio > 1.5:
+                    sos_idx = i
+                    sos_vol_ratio = vol_ratio
+                    break
+
+        if sos_idx is None:
+            return None
+
+        # Ищем LPS: откат к пробитому уровню (r_high) на меньшем объёме
+        lps_found = False
+        sos_vol = recent[sos_idx].quote_volume
+        for j in range(sos_idx + 1, len(recent)):
+            rc = recent[j]
+            if (r_high * 0.99 <= rc.low <= r_high * 1.04
+                    and rc.close > r_high
+                    and rc.quote_volume < sos_vol):
+                lps_found = True
+                break
+
+        if lps_found:
+            bonus = 20
+            event = "SOS+LPS"
+            conf  = 0.85
+            reasons = [
+                f"Wyckoff SOS: пробой {r_high:.4f} с Vol×{sos_vol_ratio:.1f}",
+                f"LPS: тест уровня на меньшем объёме — накопление подтверждено",
+                f"Диапазон {r_pct:.1f}% | Phase D входной сетап",
+            ]
+        else:
+            bonus = 14
+            event = "SOS"
+            conf  = 0.72
+            reasons = [
+                f"Wyckoff SOS: пробой сопротивления {r_high:.4f} Vol×{sos_vol_ratio:.1f}",
+                f"Диапазон {r_pct:.1f}% — ожидание LPS для подтверждения",
+            ]
+
+        sl_pct = round(max(1.5, (last.close - r_low) / last.close * 0.5 * 100), 2)
+        return PatternResult(
+            name=f"WYCKOFF_{event}", score_bonus=bonus,
+            confidence=conf, direction="long",
+            suggested_sl_pct=sl_pct,
+            reasons=reasons,
         )
 
     # ── КЛАССИЧЕСКИЕ ПАТТЕРНЫ ─────────────────────────────────────────────────
@@ -1212,12 +1302,17 @@ class ShortPatternDetector:
         rsi = getattr(md, "rsi_1h", None) if md else None
         if rsi and (rsi > 65 or rsi < 25):
             return None
-        bonus = min(20, int(12 + vol_spike * 1.5))
+        bonus   = min(20, int(12 + vol_spike * 1.5))
+        reasons = [f"Медвежий импульс | Volume {vol_spike:.1f}x avg"]
+        vwap_val = _vwap(candles, 20)
+        if vwap_val > 0 and last.close < vwap_val:
+            bonus = min(bonus + 3, 20)
+            reasons.append(f"Цена ниже VWAP {vwap_val:.4f} — подтверждение медвежьего импульса")
         return PatternResult(
             name="MOMENTUM_SHORT", score_bonus=bonus,
             confidence=min(0.85, 0.55 + vol_spike * 0.08), direction="short",
             suggested_sl_pct=round((last.open - last.close) / last.close * 100, 2),
-            reasons=[f"Медвежий импульс | Volume {vol_spike:.1f}x avg"],
+            reasons=reasons,
         )
 
     def detect_liquidity_sweep_short(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
