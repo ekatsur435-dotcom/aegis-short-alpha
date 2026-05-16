@@ -47,6 +47,8 @@ services:
         value: "65"          # AEGIS final threshold
       - key: MIN_SHORT_BASE_SCORE
         value: "50"          # BASE_SCORER порог (мягче — AEGIS потом доуточняет)
+      - key: AEGIS_SHORT_MIN_SCORE
+        value: "60"          # AEGIS engine внутренний порог (аналог AEGIS_LONG_MIN_SCORE=65)
       - key: SCAN_INTERVAL
         value: "180"          # П8: было 180 → 120s
       - key: MAX_POSITIONS
@@ -55,8 +57,20 @@ services:
         value: "2.5"
       - key: SHORT_LEVERAGE
         value: "5-30"
+      - key: SHORT_TRAIL_ACTIVATION
+        value: "0.010"         # 1.0% в прибыли — активация trailing stop
+      - key: ATR_SL_MULT
+        value: "1.5"           # Множитель ATR для расчёта SL
+      - key: ATR_SL_MIN_PCT
+        value: "1.5"           # Мин ATR SL от входа
+      - key: ATR_SL_MAX_PCT
+        value: "4.0"           # Макс ATR SL от входа
       - key: MIN_VOLUME_USDT
         value: "150000"       # П15: было 300000 → 150000
+      - key: ACCOUNT_CAPITAL_USD
+        value: "1000"          # Капитал счёта в USD (для расчёта размера позиции)
+      - key: MAX_CONSECUTIVE_LOSSES
+        value: "3"             # Стоп торговли после N подряд убытков
       - key: RISK_PER_TRADE
         value: "0.001"
       - key: MAX_POSITION_PCT
@@ -209,6 +223,16 @@ services:
         value: "5-20"
       - key: MIN_VOLUME_USDT
         value: "200000"       # П15: long — чуть выше порог для качества
+      - key: ACCOUNT_CAPITAL_USD
+        value: "1000"          # Капитал счёта в USD (для расчёта размера позиции)
+      - key: MAX_CONSECUTIVE_LOSSES
+        value: "3"             # Стоп торговли после N подряд убытков
+      - key: MAX_EXPOSURE_PCT
+        value: "0.60"          # Максимальная экспозиция портфеля
+      - key: USE_ATR_SL
+        value: "true"          # Использовать ATR для расчёта SL
+      - key: ENABLE_MOMENTUM_LONG
+        value: "true"          # Bypass z_volume gate для momentum LONG
       - key: RISK_PER_TRADE
         value: "0.001"
       - key: MAX_POSITION_PCT
@@ -253,6 +277,12 @@ services:
         value: "true"           # false = отключить фильтр консолидации полностью
       - key: FUNDING_EXTREME_LONG
         value: "-0.05"          # ≤-0.05%→score60, ≤-0.10%→75, ≤-0.15%→90 в AEGIS + BASE +10
+      - key: ENABLE_EXTREME_FUNDING_BYPASS
+        value: "true"           # ✅ FIX #4: bypass z_volume gate при экстрем. отриц. funding
+      - key: EXTREME_FUNDING_BYPASS_THRESHOLD
+        value: "0.05"           # |funding| ≥ 0.05% → bypass (ALGOUSDT -0.0565% тип)
+      - key: EXTREME_FUNDING_BYPASS_MIN_BASE
+        value: "65"             # база ≥ 65 для LONG (мягче чем 70 в SHORT)
       - key: ENABLE_TREND_DETECTOR
         value: "true"
       - key: TREND_SCORE_BONUS
