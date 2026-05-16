@@ -92,6 +92,7 @@ from detectors.liquidation_mapper import LiquidationMapper
 from detectors.delta_analyzer import DeltaAnalyzer
 from api.coinglass_client import get_coinglass_client
 from core.liquidation_detector import LiquidationZoneDetector
+from core.kill_zone_filter import KillZoneFilter  # #19
 
 
 # ============================================================================
@@ -232,6 +233,8 @@ class BotState:
         # Signal Queue + Trade Manager
         self.signal_queue      = None
         self.trade_manager     = None
+        # A5: OHLCV scan-cycle cache
+        self.ohlcv_cache       = None
 
 
 state = BotState()
@@ -411,9 +414,11 @@ async def lifespan(app: FastAPI):
     try:
         from core.signal_queue import get_signal_queue
         from execution.trade_manager import get_trade_manager
+        from core.ohlcv_cache import get_ohlcv_cache  # A5
         state.signal_queue  = get_signal_queue()
         state.trade_manager = get_trade_manager()
-        print("✅ SignalQueue + TradeManager: инициализированы")
+        state.ohlcv_cache   = get_ohlcv_cache(Config.SCAN_INTERVAL)
+        print("✅ SignalQueue + TradeManager + OHLCVCache: инициализированы")
     except Exception as _e:
         print(f"⚠️ SignalQueue/TradeManager init: {_e}")
 
@@ -736,13 +741,22 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 pass
             return None
 
-        # Загружаем OHLCV параллельно
-        ohlcv_15m, ohlcv_30m, ohlcv_4h = await asyncio.gather(
-            state.binance.get_klines(symbol, "15m", 100),
-            state.binance.get_klines(symbol, "30m", 50),
-            state.binance.get_klines(symbol, "4h", 20),
-            return_exceptions=True,
-        )
+        # A5: Загружаем OHLCV через кеш (один запрос на (symbol, interval) за скан)
+        _cache = state.ohlcv_cache
+        if _cache:
+            ohlcv_15m, ohlcv_30m, ohlcv_4h = await asyncio.gather(
+                _cache.get(symbol, "15m", 100, lambda: state.binance.get_klines(symbol, "15m", 100)),
+                _cache.get(symbol, "30m", 50,  lambda: state.binance.get_klines(symbol, "30m", 50)),
+                _cache.get(symbol, "4h",  20,  lambda: state.binance.get_klines(symbol, "4h",  20)),
+                return_exceptions=True,
+            )
+        else:
+            ohlcv_15m, ohlcv_30m, ohlcv_4h = await asyncio.gather(
+                state.binance.get_klines(symbol, "15m", 100),
+                state.binance.get_klines(symbol, "30m", 50),
+                state.binance.get_klines(symbol, "4h", 20),
+                return_exceptions=True,
+            )
         if isinstance(ohlcv_15m, Exception) or not ohlcv_15m or len(ohlcv_15m) < 20:
             if verbose:
                 print(f"{log_prefix} ❌ Недостаточно OHLCV данных (нужно 20, есть {len(ohlcv_15m) if ohlcv_15m else 0})")
@@ -1373,6 +1387,24 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             logger.debug(f"[TrendDetector] short: {_tr_e}")
             pass
 
+        # #19: KillZoneFilter — бонус/штраф по времени сессии
+        _kz_delta, _kz_reason = KillZoneFilter.get_adjustment()
+        if _kz_delta != 0:
+            base_score = max(0, min(100, base_score + _kz_delta))
+            if verbose:
+                print(f"{log_prefix} 🕐 [KILLZONE] {_kz_reason} → base_score={base_score:.1f}")
+
+        # #21: Delta Divergence — медвежья дивергенция = +18 к base_score для SHORT
+        if state.delta_analyzer and ohlcv_15m:
+            try:
+                _div = state.delta_analyzer.detect_divergence(ohlcv_15m, lookback=20)
+                if _div["bearish"] and _div["score_bonus"] > 0:
+                    base_score = max(0, min(100, base_score + _div["score_bonus"]))
+                    if verbose:
+                        print(f"{log_prefix} {_div['reason']}")
+            except Exception as _div_e:
+                logger.debug(f"[DeltaDiv] short: {_div_e}")
+
         # Dynamic TP
         btc_trend = ("down" if (cached_btc_1h or 0) < -0.5 else
                      "up"   if (cached_btc_1h or 0) > 0.5 else "sideways")
@@ -1697,6 +1729,10 @@ async def scan_market():
     exchange_full = active_count >= Config.MAX_POSITIONS
     if exchange_full:
         print(f"📊 Exchange: {active_count}/{Config.MAX_POSITIONS} SHORT slots — TG-only mode")
+
+    # A5: сбрасываем OHLCV кеш перед новым циклом скана
+    if state.ohlcv_cache:
+        state.ohlcv_cache.cycle_reset()
 
     new_signals   = 0
     tg_only_count = 0

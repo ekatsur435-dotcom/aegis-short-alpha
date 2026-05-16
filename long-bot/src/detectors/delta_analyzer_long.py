@@ -97,3 +97,34 @@ class DeltaAnalyzerLong:
         except Exception as e:
             logger.warning(f"[DeltaLong] {symbol}: ошибка расчёта — {type(e).__name__}: {e}")
             return {"score": 25.0, "reasons": ["Delta: ошибка расчёта"], "metadata": {}}
+
+    def detect_divergence(self, ohlcv: list, lookback: int = 10) -> dict:
+        """#21: Delta Divergence — бычья дивергенция для LONG."""
+        result = {"bearish": False, "bullish": False, "score_bonus": 0, "reason": ""}
+        if not ohlcv or len(ohlcv) < lookback + 2:
+            return result
+        try:
+            recent = ohlcv[-lookback:]
+            prices = [c.close for c in recent]
+            cvd_series, running = [], 0.0
+            for c in recent:
+                rng  = c.high - c.low
+                body = c.close - c.open
+                vol  = getattr(c, "volume", 0) or getattr(c, "quote_volume", 0)
+                running += vol * (body / rng) if rng > 0 else 0.0
+                cvd_series.append(running)
+            half = len(prices) // 2
+            p_fmin, p_smin = min(prices[:half]), min(prices[half:])
+            c_fmin, c_smin = min(cvd_series[:half]), min(cvd_series[half:])
+            # Бычья дивергенция: цена LL, CVD HL
+            if p_smin < p_fmin * 0.998 and c_smin > c_fmin * 1.02:
+                result["bullish"]     = True
+                result["score_bonus"] = 18
+                result["reason"]      = (
+                    f"📈 [DELTA_DIV] Бычья дивергенция: "
+                    f"Price LL={p_smin:.4f} < {p_fmin:.4f}, CVD HL={c_smin:.0f} > {c_fmin:.0f}"
+                )
+                logger.info(result["reason"])
+        except Exception as e:
+            logger.debug(f"[DeltaDiv long]: {e}")
+        return result

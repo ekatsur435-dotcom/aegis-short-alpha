@@ -441,11 +441,21 @@ class AegisLongSignalEngine:
             )
 
         # GATE: z_volume — главный индикатор mean-reversion LONG.
-        # Порог настраивается через ENV Z_VOLUME_GATE_MIN (default=8, было 20).
-        # ✅ v2.1: Momentum LONG bypass — если RSI растущий + volume spike + тренд вверх,
-        #         обходим z_volume gate (стратегия Momentum, не Mean-Reversion).
         z_vol = components.get("z_volume")
-        _z_gate_failed = z_vol and z_vol.raw_score < _Z_VOLUME_GATE_MIN
+        # ── BUG-4 FIX: Adaptive z_gate — при системных условиях снижаем порог до 3 ──
+        # При BTC краше -5%/h или экстремальном funding объём аномально низкий → z_gate = 3
+        # FIDAUSDT score=98 z=1 был убит при системном сливе — эта логика это исправляет
+        _z_effective = _Z_VOLUME_GATE_MIN
+        _funding_now = getattr(market_data, "funding_rate", 0.0) or 0.0
+        if (_Z_VOLUME_GATE_MIN > 3
+                and (btc_change_1h <= -_C6_SYSTEMIC_BTC_PCT                   # BTC краш -5%/h
+                     or abs(_funding_now) >= _EF_THRESHOLD_LONG)):             # экстремальный funding
+            _z_effective = 3
+            logger.debug(
+                f"[Z_GATE_ADAPTIVE] {symbol}: BTC={btc_change_1h:+.1f}% fund={_funding_now:.4f}% "
+                f"→ z_gate adaptive 3 (normal={_Z_VOLUME_GATE_MIN})"
+            )
+        _z_gate_failed = z_vol and z_vol.raw_score < _z_effective
         if _z_gate_failed:
             _momentum_bypass = False
             if _ENABLE_MOMENTUM_LONG:
@@ -464,7 +474,7 @@ class AegisLongSignalEngine:
                         f"1H={_p1h:+.1f}% 4H={_p4h:+.1f}%"
                     )
                     logger.info(
-                        f"[AEGIS MOMENTUM] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"[AEGIS MOMENTUM] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
                         f"→ Momentum bypass (RSI={_rsi:.0f} Vol×{_vol_spk:.1f})"
                     )
                     # Бонус за momentum в score
@@ -489,7 +499,7 @@ class AegisLongSignalEngine:
                     )
                     logger.info(
                         f"[AEGIS EXTREME FUNDING LONG] {symbol}: z_volume={z_vol.raw_score:.0f} "
-                        f"< {_Z_VOLUME_GATE_MIN} → bypass (funding={_funding_ef:.4f}% "
+                        f"< {_z_effective} → bypass (funding={_funding_ef:.4f}% "
                         f"base={base_score:.0f})"
                     )
 
@@ -500,7 +510,7 @@ class AegisLongSignalEngine:
                     # z близко к порогу (например 6.0/7.0 из 8) + высокий score
                     _momentum_bypass = True
                     all_reasons.append(f"C6 NEAR-MISS bypass: z={_z_raw:.1f}≥{_C6_NEAR_MISS_Z} base={base_score:.0f}")
-                    logger.info(f"[AEGIS C6 NEAR-MISS] {symbol}: z={_z_raw:.1f} near gate {_Z_VOLUME_GATE_MIN}, base={base_score:.0f}")
+                    logger.info(f"[AEGIS C6 NEAR-MISS] {symbol}: z={_z_raw:.1f} near gate {_z_effective}, base={base_score:.0f}")
                 elif base_score >= _C6_HIGH_SCORE_MIN and _z_raw >= 2.0:
                     # Исключительный score (≥80) перевешивает слабый volume при наличии минимальной активности
                     _momentum_bypass = True
@@ -514,7 +524,7 @@ class AegisLongSignalEngine:
 
             if not _momentum_bypass:
                 logger.info(
-                    f"[AEGIS REJECT LONG] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                    f"[AEGIS REJECT LONG] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
                     f"— нет признаков dump exhaustion или momentum, сигнал отклонён"
                 )
                 return None

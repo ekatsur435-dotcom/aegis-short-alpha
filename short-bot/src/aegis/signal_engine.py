@@ -48,7 +48,7 @@ _FUNDING_EXTREME_SHORT      = float(os.getenv("FUNDING_EXTREME_SHORT", "0.05")) 
 # C6 Fix: дополнительные bypass-уровни z_volume gate
 _C6_NEAR_MISS_Z        = float(os.getenv("Z_GATE_NEAR_MISS_Z_MIN",       "6.0"))  # z≥6 + base≥65 → bypass
 _C6_HIGH_SCORE_MIN     = float(os.getenv("Z_GATE_HIGH_SCORE_BYPASS_MIN", "80"))   # base≥80 + z≥2 → bypass
-_C6_SYSTEMIC_BTC_PCT   = float(os.getenv("Z_GATE_SYSTEMIC_BTC_PCT",      "5.0"))  # BTC +X%/h → systemic pump
+_C6_SYSTEMIC_BTC_PCT   = float(os.getenv("Z_GATE_SYSTEMIC_BTC_PCT",      "5.0"))  # BTC -X%/h → systemic crash (SHORT)
 
 
 class SignalStrength(Enum):
@@ -406,10 +406,21 @@ class AegisSignalEngine:
             )
 
         # HARD GATE: z_volume — главный индикатор SHORT (памп/перекупленность).
-        # ✅ FIX: порог читается из ENV Z_VOLUME_GATE_MIN_SHORT (было хардкод 15)
-        # ✅ Momentum SHORT bypass: при сильном даунтренде + volume spike обходим gate.
         z_vol = components.get("z_volume")
-        _z_gate_failed = z_vol and z_vol.raw_score < _Z_VOLUME_GATE_MIN
+        # ── BUG-3 FIX: Adaptive z_gate — при системных условиях снижаем порог до 3 ──
+        # При BTC краше -5%/h или экстремальном funding объём может быть ниже нормы
+        # (институционалы уже вышли, паники ещё нет) → z_gate = 3 вместо полного отказа
+        _z_effective = _Z_VOLUME_GATE_MIN
+        _funding_now = getattr(market_data, "funding_rate", 0.0) or 0.0
+        if (_Z_VOLUME_GATE_MIN > 3
+                and (btc_change_1h <= -_C6_SYSTEMIC_BTC_PCT                   # BUG-1: BTC краш (было >= памп)
+                     or abs(_funding_now) >= _EXTREME_FUNDING_THRESHOLD)):     # экстремальный funding
+            _z_effective = 3
+            logger.debug(
+                f"[Z_GATE_ADAPTIVE] {symbol}: BTC={btc_change_1h:+.1f}% fund={_funding_now:.4f}% "
+                f"→ z_gate adaptive 3 (normal={_Z_VOLUME_GATE_MIN})"
+            )
+        _z_gate_failed = z_vol and z_vol.raw_score < _z_effective
         if _z_gate_failed:
             _momentum_bypass = False
             if _ENABLE_MOMENTUM_SHORT:
@@ -428,7 +439,7 @@ class AegisSignalEngine:
                         f"1H={_p1h:+.1f}% 4H={_p4h:+.1f}%"
                     )
                     logger.info(
-                        f"[AEGIS MOMENTUM SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"[AEGIS MOMENTUM SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
                         f"→ Momentum bypass (RSI={_rsi:.0f} Vol×{_vol_spk:.1f} 1H={_p1h:+.1f}%)"
                     )
                     if _p24h < -15: final_score = min(final_score + 10, 100)
@@ -453,7 +464,7 @@ class AegisSignalEngine:
                         f"trend=up patterns={[p for p in _pats if any(b in p for b in _BEARISH)][:2]}"
                     )
                     logger.info(
-                        f"[AEGIS OVERBOUGHT SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"[AEGIS OVERBOUGHT SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
                         f"→ Overbought bypass (RSI={_rsi_ob:.0f} L/S={_ls_ob:.0f}% pattern)"
                     )
 
@@ -478,7 +489,7 @@ class AegisSignalEngine:
                         f"24H={_p24h_bc:+.1f}% HTF={_htf_bc[:20]}"
                     )
                     logger.info(
-                        f"[AEGIS BEARISH CONT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"[AEGIS BEARISH CONT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
                         f"→ Bearish continuation bypass (RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
                         f"24H={_p24h_bc:+.1f}%)"
                     )
@@ -497,7 +508,7 @@ class AegisSignalEngine:
                         f"patterns={_n_pats_ef} base={base_score:.0f}"
                     )
                     logger.info(
-                        f"[AEGIS EXTREME FUNDING] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                        f"[AEGIS EXTREME FUNDING] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
                         f"→ Extreme funding bypass (funding={_funding_ef:.4f}% pats={_n_pats_ef} base={base_score:.0f})"
                     )
 
@@ -508,21 +519,22 @@ class AegisSignalEngine:
                     # z близко к порогу (например 6.0/7.0 из 8) + высокий score
                     _momentum_bypass = True
                     all_reasons.append(f"C6 NEAR-MISS bypass: z={_z_raw:.1f}≥{_C6_NEAR_MISS_Z} base={base_score:.0f}")
-                    logger.info(f"[AEGIS C6 NEAR-MISS] {symbol}: z={_z_raw:.1f} near gate {_Z_VOLUME_GATE_MIN}, base={base_score:.0f}")
+                    logger.info(f"[AEGIS C6 NEAR-MISS] {symbol}: z={_z_raw:.1f} near gate {_z_effective}, base={base_score:.0f}")
                 elif base_score >= _C6_HIGH_SCORE_MIN and _z_raw >= 2.0:
                     # Исключительный score (≥80) перевешивает слабый volume при наличии минимальной активности
                     _momentum_bypass = True
                     all_reasons.append(f"C6 HIGH-SCORE bypass: base={base_score:.0f}≥{_C6_HIGH_SCORE_MIN} z={_z_raw:.1f}")
                     logger.info(f"[AEGIS C6 HIGH-SCORE] {symbol}: base={base_score:.0f} exceptional → bypass z_gate")
-                elif btc_change_1h >= _C6_SYSTEMIC_BTC_PCT and _z_raw >= 1.5:
-                    # Системный памп BTC → объём на шортируемых монетах нарастает, z_gate слишком строгий
+                elif btc_change_1h <= -_C6_SYSTEMIC_BTC_PCT and _z_raw >= 1.5:
+                    # BUG-1 FIX: Системный КРАШ BTC (было: памп — логическая инверсия!)
+                    # При BTC -5%/h весь рынок падает → шорты актуальны, z_gate слишком строгий
                     _momentum_bypass = True
-                    all_reasons.append(f"C6 SYSTEMIC PUMP bypass: BTC 1H={btc_change_1h:+.1f}% z={_z_raw:.1f}")
-                    logger.info(f"[AEGIS C6 SYSTEMIC] {symbol}: BTC {btc_change_1h:+.1f}% pump → volume building → bypass")
+                    all_reasons.append(f"C6 SYSTEMIC CRASH bypass: BTC 1H={btc_change_1h:+.1f}% z={_z_raw:.1f}")
+                    logger.info(f"[AEGIS C6 SYSTEMIC] {symbol}: BTC {btc_change_1h:+.1f}% crash → systemic dump → bypass")
 
             if not _momentum_bypass:
                 logger.info(
-                    f"[AEGIS REJECT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_Z_VOLUME_GATE_MIN} "
+                    f"[AEGIS REJECT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
                     f"— нет pump exhaustion или momentum downtrend, сигнал отклонён"
                 )
                 return None
