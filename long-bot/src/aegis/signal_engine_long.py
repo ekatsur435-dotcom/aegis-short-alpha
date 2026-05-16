@@ -531,15 +531,40 @@ class AegisLongSignalEngine:
 
         if base_score > 0:
             if base_score >= 70:
-                # Aegis — качественный фильтр: реальное взвешенное среднее 45/55
-                # Предотвращает inflate до 100% при слабом Aegis
                 final_score = total_weighted * 0.45 + base_score * 0.55
             elif base_score >= 58:
-                # Хороший базовый скор — base_score главный драйвер (70%), Aegis фильтр
                 final_score = total_weighted * 0.30 + base_score * 0.70
             else:
-                # Слабый базовый скор — Aegis должен компенсировать (50/50)
                 final_score = total_weighted * 0.50 + base_score * 0.50
+
+        # ── HTF TREND ALIGNMENT: штраф если 4H+1H оба медвежьи ──────────
+        # Предотвращает "ловлю падающего ножа" при нисходящем HTF тренде (WLD, FHE паттерн)
+        _p4h_chk = getattr(market_data, "price_change_4h", 0.0) or 0.0
+        _p1h_chk = getattr(market_data, "price_change_1h", 0.0) or 0.0
+        _htf_str_chk = getattr(market_data, "htf_structure", "") or ""
+        _htf_bearish = (
+            "bear" in _htf_str_chk.lower()
+            or (_p4h_chk < -1.5 and _p1h_chk < -0.3)
+        )
+        if _htf_bearish:
+            _has_reversal = any(
+                kw in r.lower()
+                for r in all_reasons
+                for kw in ("bos", "choch", "spring", "sweep", "reversal", "разворот", "чо-чо", "восстановление")
+            )
+            if not _has_reversal:
+                _htf_penalty = float(os.environ.get("HTF_BEARISH_PENALTY", "5"))
+                final_score = max(final_score - _htf_penalty, 0)
+                all_reasons.append(
+                    f"⚠️ HTF BEARISH penalty −{_htf_penalty:.0f}: 4H={_p4h_chk:+.1f}% 1H={_p1h_chk:+.1f}% "
+                    f"— нет подтверждения разворота"
+                )
+                logger.debug(
+                    f"[HTF_PENALTY] {symbol}: 4H={_p4h_chk:+.1f}% 1H={_p1h_chk:+.1f}% bearish "
+                    f"→ −{_htf_penalty:.0f}pts (нет BOS/CHoCH/Spring)"
+                )
+            else:
+                all_reasons.append(f"✅ HTF bearish но есть подтверждение разворота")
 
         # Порог: используем min_score из конфига напрямую
         effective_min = self.min_score

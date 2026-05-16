@@ -25,11 +25,37 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
 
-# Настройка логирования — INFO уровень для видимости fallback логов
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Настройка логирования — однократная конфигурация с dedup-фильтром
+import time as _time
+
+class _DedupLogFilter(logging.Filter):
+    """Подавляет одинаковые log-строки в пределах 5-секундного окна."""
+    def __init__(self, capacity: int = 300):
+        super().__init__()
+        self._seen: dict = {}
+        self._cap = capacity
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        key = f"{record.levelno}:{record.name}:{record.getMessage()[:120]}"
+        now = _time.monotonic()
+        last = self._seen.get(key, 0.0)
+        if now - last < 5.0:
+            return False
+        self._seen[key] = now
+        if len(self._seen) > self._cap:
+            oldest = sorted(self._seen, key=self._seen.get)[:60]
+            for k in oldest:
+                del self._seen[k]
+        return True
+
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+_dedup_filter = _DedupLogFilter()
+logging.getLogger("aegis.signal_engine_long").addFilter(_dedup_filter)
+logging.getLogger("aegis").addFilter(_dedup_filter)
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -93,8 +119,7 @@ from detectors.oi_analyzer_long import OIAnalyzerLong, FundingConfigLong
 from detectors.liquidation_mapper_long import LiquidationMapperLong
 from detectors.delta_analyzer_long import DeltaAnalyzerLong
 from detectors.netflow_analyzer import NetflowAnalyzerLong
-from api.coinglass_client import get_coinglass_client
-from core.liquidation_detector import LiquidationZoneDetector
+# Coinglass API отключён: постоянные HTTP 500 в продакшне → LiqMapper работает без него
 from core.kill_zone_filter import KillZoneFilter  # #19
 
 
@@ -245,7 +270,7 @@ class BotState:
         self.delta_analyzer:      Optional[DeltaAnalyzerLong]       = None
         self.netflow_analyzer:    Optional[NetflowAnalyzerLong]     = None
         self.coinglass            = None
-        self.liq_detector:        Optional[LiquidationZoneDetector] = None
+        self.liq_detector:        Optional[Any] = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100
         self.btc_change_1h:    Optional[float] = None  # ✅ FIX #5: кешируем BTC 1h для delta scorer
         # A2: SystemicCrashGuard
@@ -388,9 +413,9 @@ async def lifespan(app: FastAPI):
 
     state.liq_mapper = LiquidationMapperLong()
     state.delta_analyzer = DeltaAnalyzerLong()
-    state.netflow_analyzer = NetflowAnalyzerLong() if os.getenv("COINGLASS_API_KEY") else None
-    state.coinglass    = get_coinglass_client()
-    state.liq_detector = LiquidationZoneDetector(coinglass_client=state.coinglass)
+    state.netflow_analyzer = None          # NetflowAnalyzer требует Coinglass — отключён
+    state.coinglass    = None              # Coinglass API отключён (HTTP 500)
+    state.liq_detector = None             # LiquidationZoneDetector требует Coinglass — отключён
 
     state.signal_engine = AegisLongSignalEngine(
         dump_detector=state.dump_detector,
@@ -1541,6 +1566,17 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 tp_price = price * (1 + tp_pct / 100)
                 take_profits.append((round(tp_price, 8), _tp_weights[i]))
 
+        # ── SL COOLDOWN CHECK: блок повторного входа после стопа ─────
+        _sl_cd_h = float(os.getenv("SL_COOLDOWN_HOURS", "1.0"))
+        _sl_cd_key = f"sl_cooldown:long:{symbol.replace('-', '')}"
+        try:
+            if state.redis and state.redis._client.exists(_sl_cd_key):
+                if verbose:
+                    print(f"{log_prefix} 🚫 [SL_COOLDOWN] {symbol}: стоп был недавно — ждём {_sl_cd_h}ч")
+                return None
+        except Exception:
+            pass
+
         # ── AEGIS LONG ENGINE ─────────────────────────────────────────
         aegis_signal = None
         aegis_components = {}
@@ -2198,16 +2234,25 @@ async def _startup_sl_sync():
             sl = entry * (1 - sl_pct / 100)  # LONG: SL НИЖЕ entry
 
             pos_side = "LONG"
-            ok = await state.auto_trader.bingx.update_stop_loss(sym, pos_side, sl, direction)
+            # ── RETRY LOOP: до 3 попыток, 15-25с между попытками при code=109400 ──
+            _max_attempts = 3
+            _sl_ok = False
+            for _att in range(_max_attempts):
+                if _att > 0:
+                    _wait = 15 + _att * 5
+                    print(f"[SL-SYNC] ⏳ {sym} LONG: retry {_att}/{_max_attempts-1} через {_wait}s (API может быть временно недоступен)...")
+                    await asyncio.sleep(_wait)
+                _sl_ok = await state.auto_trader.bingx.update_stop_loss(sym, pos_side, sl, direction)
+                if _sl_ok:
+                    break
 
-            if ok:
+            if _sl_ok:
                 fixed += 1
                 print(f"[SL-SYNC] ✅ {sym} LONG: SL={sl:.6f} выставлен")
                 _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
                 if _redis_sig:
                     _redis_sig["stop_loss"] = sl
                     state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
-                # Деdup-ключ: не дублировать в течение 10 мин
                 try:
                     state.redis._client.setex(_dedup_key, 600, "1")
                 except Exception:
@@ -2221,7 +2266,18 @@ async def _startup_sl_sync():
                 )
             else:
                 skipped += 1
-                print(f"[SL-SYNC] ❌ {sym}: не удалось выставить SL")
+                print(f"[SL-SYNC] ❌ {sym} LONG: SL НЕ ВЫСТАВЛЕН после {_max_attempts} попыток — позиция БЕЗ ЗАЩИТЫ!")
+                try:
+                    await state.telegram.send_message(
+                        f"🚨🚨 <b>КРИТИЧНО: SL НЕ ВЫСТАВЛЕН</b>\n\n"
+                        f"🟢 <code>#{sym}</code> LONG\n"
+                        f"📍 Вход: <b>{entry:.6f}</b>\n"
+                        f"🛑 Пробовали SL: <b>{sl:.6f}</b>\n"
+                        f"❌ <b>{_max_attempts} попытки провалились — позиция без стоп-лосса!</b>\n"
+                        f"⚠️ Проверь и выставь SL вручную на BingX!"
+                    )
+                except Exception:
+                    pass
 
         print(f"[SL-SYNC] Итого: {fixed} исправлено, {skipped} пропущено из {len(positions)}")
 

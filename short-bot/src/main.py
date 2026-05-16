@@ -90,8 +90,7 @@ from detectors.pump_detector import PumpDetector, ZScoreConfig
 from detectors.oi_analyzer import OIAnalyzer, FundingConfig
 from detectors.liquidation_mapper import LiquidationMapper
 from detectors.delta_analyzer import DeltaAnalyzer
-from api.coinglass_client import get_coinglass_client
-from core.liquidation_detector import LiquidationZoneDetector
+# Coinglass API отключён: постоянные HTTP 500 → liq_detector=None
 from core.kill_zone_filter import KillZoneFilter  # #19
 
 
@@ -224,7 +223,7 @@ class BotState:
 
         # Metrics
         self.coinglass        = None
-        self.liq_detector:    Optional[LiquidationZoneDetector] = None
+        self.liq_detector:    Optional[Any] = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100, None = не загружен
         # Signals DB + Trade Analytics
         self.signals_db        = None
@@ -363,8 +362,8 @@ async def lifespan(app: FastAPI):
 
     state.liq_mapper     = LiquidationMapper() if Config.ENABLE_LIQ_MAPPER else None
     state.delta_analyzer = DeltaAnalyzer()     if Config.ENABLE_DELTA else None
-    state.coinglass      = get_coinglass_client()
-    state.liq_detector   = LiquidationZoneDetector(coinglass_client=state.coinglass)
+    state.coinglass      = None   # Coinglass API отключён (HTTP 500)
+    state.liq_detector   = None  # LiquidationZoneDetector требует Coinglass
 
     # ── Aegis Signal Engine ──
     state.signal_engine = AegisSignalEngine(
@@ -2085,22 +2084,29 @@ async def _startup_sl_sync():
             sl = entry * (1 + sl_pct / 100)  # SHORT: SL ВЫШЕ entry
 
             pos_side = "SHORT"
-            ok = await state.auto_trader.bingx.update_stop_loss(sym, pos_side, sl, direction)
+            # ── RETRY LOOP: до 3 попыток, 15-25с между попытками ──
+            _max_attempts = 3
+            _sl_ok = False
+            for _att in range(_max_attempts):
+                if _att > 0:
+                    _wait = 15 + _att * 5
+                    print(f"[SL-SYNC] ⏳ {sym} SHORT: retry {_att}/{_max_attempts-1} через {_wait}s...")
+                    await asyncio.sleep(_wait)
+                _sl_ok = await state.auto_trader.bingx.update_stop_loss(sym, pos_side, sl, direction)
+                if _sl_ok:
+                    break
 
-            if ok:
+            if _sl_ok:
                 fixed += 1
                 print(f"[SL-SYNC] ✅ {sym} SHORT: аварийный SL={sl:.6f} выставлен")
-                # Обновляем Redis
                 _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
                 if _redis_sig:
                     _redis_sig["stop_loss"] = sl
                     state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
-                # Деdup-ключ: не дублировать в течение 10 мин
                 try:
-                    state.redis.client.setex(_dedup_key, 600, "1")  # ✅ FIX C1
+                    state.redis.client.setex(_dedup_key, 600, "1")
                 except Exception:
                     pass
-                # Уведомляем в TG
                 await state.telegram.send_message(
                     f"🚨 <b>SL SYNC</b> — аварийный стоп выставлен\n\n"
                     f"🔴 <code>#{sym}</code> SHORT\n"
@@ -2110,7 +2116,18 @@ async def _startup_sl_sync():
                 )
             else:
                 skipped += 1
-                print(f"[SL-SYNC] ❌ {sym}: не удалось выставить SL")
+                print(f"[SL-SYNC] ❌ {sym} SHORT: SL НЕ ВЫСТАВЛЕН после {_max_attempts} попыток — позиция БЕЗ ЗАЩИТЫ!")
+                try:
+                    await state.telegram.send_message(
+                        f"🚨🚨 <b>КРИТИЧНО: SL НЕ ВЫСТАВЛЕН</b>\n\n"
+                        f"🔴 <code>#{sym}</code> SHORT\n"
+                        f"📍 Вход: <b>{entry:.6f}</b>\n"
+                        f"🛑 Пробовали SL: <b>{sl:.6f}</b>\n"
+                        f"❌ <b>{_max_attempts} попытки провалились — позиция без стоп-лосса!</b>\n"
+                        f"⚠️ Проверь и выставь SL вручную на BingX!"
+                    )
+                except Exception:
+                    pass
 
         print(f"[SL-SYNC] Итого: {fixed} исправлено, {skipped} пропущено из {len(positions)}")
 
