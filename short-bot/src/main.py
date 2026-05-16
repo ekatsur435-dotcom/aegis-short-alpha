@@ -91,6 +91,8 @@ from detectors.pump_detector import PumpDetector, ZScoreConfig
 from detectors.oi_analyzer import OIAnalyzer, FundingConfig
 from detectors.liquidation_mapper import LiquidationMapper
 from detectors.delta_analyzer import DeltaAnalyzer
+from api.coinglass_client import get_coinglass_client
+from core.liquidation_detector import LiquidationZoneDetector
 
 
 # ============================================================================
@@ -222,6 +224,7 @@ class BotState:
 
         # Metrics
         self.coinglass        = None
+        self.liq_detector:    Optional[LiquidationZoneDetector] = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100, None = не загружен
 
 
@@ -351,6 +354,8 @@ async def lifespan(app: FastAPI):
 
     state.liq_mapper     = LiquidationMapper() if Config.ENABLE_LIQ_MAPPER else None
     state.delta_analyzer = DeltaAnalyzer()     if Config.ENABLE_DELTA else None
+    state.coinglass      = get_coinglass_client()
+    state.liq_detector   = LiquidationZoneDetector(coinglass_client=state.coinglass)
 
     # ── Aegis Signal Engine ──
     state.signal_engine = AegisSignalEngine(
@@ -460,10 +465,32 @@ async def lifespan(app: FastAPI):
     state.last_scan  = datetime.utcnow()
 
     # ── Position Tracker ──
+    def _on_trade_closed(record: dict):
+        if state.performance_tracker:
+            try:
+                from aegis.performance_tracker import TradeRecord
+                state.performance_tracker.record_trade(TradeRecord(
+                    symbol=record.get("symbol", ""),
+                    direction=record.get("direction", "short"),
+                    entry_price=float(record.get("entry_price", 0)),
+                    exit_price=float(record.get("close_price", 0)),
+                    entry_time=record.get("opened_at", ""),
+                    exit_time=record.get("closed_at", ""),
+                    pnl_pct=float(record.get("pnl_pct", 0)),
+                    pnl_usd=float(record.get("pnl_pct", 0)) * float(os.getenv("ACCOUNT_CAPITAL_USD", "1000")) / 100,
+                    won=float(record.get("pnl_pct", 0)) > 0,
+                    exit_reason=record.get("close_type", ""),
+                    score=float(record.get("score", 0)),
+                    strength=record.get("strength", ""),
+                ))
+            except Exception as _e:
+                pass
+
     state.tracker = PositionTracker(
         bot_type=Config.BOT_TYPE, telegram=state.telegram,
         redis_client=state.redis, binance_client=state.binance,
         config=Config, auto_trader=state.auto_trader,
+        on_trade_closed=_on_trade_closed,
     )
 
     mode_str = "DEMO" if Config.BINGX_DEMO else "REAL"
@@ -892,6 +919,14 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 _pdp = (_c.close - _c.open) / _c.open if _c.open > 0 else 0
                 _delta_30m.append(_c.quote_volume * (1 if _pdp >= 0 else -1))
 
+        # S10: Liquidation Zone магниты (Coinglass)
+        _liq_analysis = None
+        if state.liq_detector:
+            try:
+                _liq_analysis = await state.liq_detector.analyze_symbol(symbol, price)
+            except Exception:
+                pass
+
         base_result = state.scorer.calculate_score(
             rsi_1h=md.rsi_1h or 50,
             funding_current=md.funding_rate,
@@ -916,6 +951,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             zone=_zone,
             delta_30m=_delta_30m,
             orderbook_score=_ob_score,
+            liq_analysis=_liq_analysis,
         )
 
         # Fear & Greed макро-модификатор — применяем ДО проверки is_valid

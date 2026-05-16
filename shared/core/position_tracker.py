@@ -54,13 +54,14 @@ class PositionTracker:
     BREAKEVEN_BUFFER_TP2 = 0.002  # SL = entry + 0.2% после TP2
 
     def __init__(self, *, bot_type, telegram, redis_client,
-                 binance_client, config, auto_trader=None):
+                 binance_client, config, auto_trader=None, on_trade_closed=None):
         self.bot_type    = bot_type
         self.tg          = telegram
         self.redis       = redis_client
         self.binance     = binance_client
         self.config      = config
         self.auto_trader = auto_trader
+        self.on_trade_closed = on_trade_closed  # Callback: fn(record: dict) → called on TP/SL close
         
         # Trail activation thresholds из config (env vars)
         # LONG: 2.5% по умолчанию, SHORT: 3% по умолчанию
@@ -1197,6 +1198,12 @@ class PositionTracker:
 
             if self.auto_trader:
                 self.auto_trader.record_trade_result(pnl_pct)
+
+            if self.on_trade_closed:
+                try:
+                    self.on_trade_closed(record)
+                except Exception as _cb_err:
+                    print(f"[PT] on_trade_closed callback error: {_cb_err}")
 
         except Exception as e:
             print(f"[PT] _record_pnl: {e}")

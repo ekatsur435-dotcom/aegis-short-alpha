@@ -490,7 +490,8 @@ class ShortScorer(BaseScorer):
                         oi_1h: float = 0.0, oi_4h: float = 0.0,
                         htf_structure: str = "", zone: str = "",
                         delta_30m: Optional[List[float]] = None,
-                        orderbook_score: int = 0) -> ScoreResult:  # P1: order book score
+                        orderbook_score: int = 0,
+                        liq_analysis=None) -> ScoreResult:
         if hourly_deltas is None:
             hourly_deltas = []
         if patterns is None:
@@ -525,6 +526,10 @@ class ShortScorer(BaseScorer):
             total += int(orderbook_score)
         except Exception:
             pass
+        # S10: Liquidation zone магниты
+        liq_comp = self.calculate_liquidation_component(liq_analysis)
+        liq_bonus = liq_comp.score
+        total += liq_bonus
         total = min(max(total, 0), 100)
         reasons = []
         if components[0].score >= 8:  reasons.append(f"RSI перекуплен ({rsi_1h:.1f})")
@@ -539,6 +544,7 @@ class ShortScorer(BaseScorer):
         if tk_reason: reasons.append(tk_reason)
         if fe_reason: reasons.append(fe_reason)
         if orderbook_score >= 6: reasons.append(f"Стакан подтверждает short")
+        if liq_bonus != 0 and liq_comp.description: reasons.append(liq_comp.description)
         # Funding — только для уведомления, не в скоре
         f_info = self._funding_info_str(funding_current, funding_accumulated)
         return ScoreResult(
@@ -719,7 +725,8 @@ class LongScorer(BaseScorer):
                         htf_structure: str = "", zone: str = "",
                         momentum_mode: bool = False,
                         delta_30m: Optional[List[float]] = None,
-                        orderbook_score: int = 0) -> ScoreResult:  # P1: order book score
+                        orderbook_score: int = 0,
+                        liq_analysis=None) -> ScoreResult:
         if hourly_deltas is None:
             hourly_deltas = []
         if patterns is None:
@@ -764,6 +771,10 @@ class LongScorer(BaseScorer):
             total += int(orderbook_score)
         except Exception:
             pass
+        # S10: Liquidation zone магниты
+        liq_comp = self.calculate_liquidation_component(liq_analysis)
+        liq_bonus = liq_comp.score
+        total += liq_bonus
         total = min(max(total, 0), 100)
         reasons = []
         if components[0].score >= 15: reasons.append(f"RSI перепродан ({rsi_1h:.1f})")
@@ -778,6 +789,7 @@ class LongScorer(BaseScorer):
         if tk_reason: reasons.append(tk_reason)
         if fe_reason: reasons.append(fe_reason)
         if orderbook_score >= 6: reasons.append(f"Стакан подтверждает long")
+        if liq_bonus != 0 and liq_comp.description: reasons.append(liq_comp.description)
         # Funding — только для уведомления, не в скоре
         f_info = self._funding_info_str(funding_current, funding_accumulated)
         return ScoreResult(

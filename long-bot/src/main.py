@@ -92,6 +92,8 @@ from detectors.oi_analyzer_long import OIAnalyzerLong, FundingConfigLong
 from detectors.liquidation_mapper_long import LiquidationMapperLong
 from detectors.delta_analyzer_long import DeltaAnalyzerLong
 from detectors.netflow_analyzer import NetflowAnalyzerLong
+from api.coinglass_client import get_coinglass_client
+from core.liquidation_detector import LiquidationZoneDetector
 
 
 # ============================================================================
@@ -240,6 +242,8 @@ class BotState:
         self.liq_mapper:          Optional[LiquidationMapperLong]   = None
         self.delta_analyzer:      Optional[DeltaAnalyzerLong]       = None
         self.netflow_analyzer:    Optional[NetflowAnalyzerLong]     = None
+        self.coinglass            = None
+        self.liq_detector:        Optional[LiquidationZoneDetector] = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100
         self.btc_change_1h:    Optional[float] = None  # ✅ FIX #5: кешируем BTC 1h для delta scorer
 
@@ -373,6 +377,8 @@ async def lifespan(app: FastAPI):
     state.liq_mapper = LiquidationMapperLong()
     state.delta_analyzer = DeltaAnalyzerLong()
     state.netflow_analyzer = NetflowAnalyzerLong() if os.getenv("COINGLASS_API_KEY") else None
+    state.coinglass    = get_coinglass_client()
+    state.liq_detector = LiquidationZoneDetector(coinglass_client=state.coinglass)
 
     state.signal_engine = AegisLongSignalEngine(
         dump_detector=state.dump_detector,
@@ -476,10 +482,32 @@ async def lifespan(app: FastAPI):
     state.is_running = True
     state.last_scan  = datetime.utcnow()
 
+    def _on_trade_closed(record: dict):
+        if state.performance_tracker:
+            try:
+                from aegis.performance_tracker import TradeRecord
+                state.performance_tracker.record_trade(TradeRecord(
+                    symbol=record.get("symbol", ""),
+                    direction=record.get("direction", "long"),
+                    entry_price=float(record.get("entry_price", 0)),
+                    exit_price=float(record.get("close_price", 0)),
+                    entry_time=record.get("opened_at", ""),
+                    exit_time=record.get("closed_at", ""),
+                    pnl_pct=float(record.get("pnl_pct", 0)),
+                    pnl_usd=float(record.get("pnl_pct", 0)) * float(os.getenv("ACCOUNT_CAPITAL_USD", "1000")) / 100,
+                    won=float(record.get("pnl_pct", 0)) > 0,
+                    exit_reason=record.get("close_type", ""),
+                    score=float(record.get("score", 0)),
+                    strength=record.get("strength", ""),
+                ))
+            except Exception:
+                pass
+
     state.tracker = PositionTracker(
         bot_type=Config.BOT_TYPE, telegram=state.telegram,
         redis_client=state.redis, binance_client=state.binance,
         config=Config, auto_trader=state.auto_trader,
+        on_trade_closed=_on_trade_closed,
     )
 
     mode_str = "DEMO" if Config.BINGX_DEMO else "REAL"
@@ -960,6 +988,14 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         if _momentum_mode and verbose:
             print(f"{log_prefix} 🚀 [MOMENTUM MODE] RSI={md.rsi_1h:.0f} price1h=+{_p1h:.1f}% OI1h=+{_oi_1h:.1f}% vol={_vol_sp:.1f}x")
 
+        # S10: Liquidation Zone магниты (Coinglass)
+        _liq_analysis = None
+        if state.liq_detector:
+            try:
+                _liq_analysis = await state.liq_detector.analyze_symbol(symbol, md.price)
+            except Exception:
+                pass
+
         base_result = state.scorer.calculate_score(
             rsi_1h=md.rsi_1h or 50,
             funding_current=md.funding_rate,
@@ -987,6 +1023,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             momentum_mode=_momentum_mode,
             delta_30m=_delta_30m,
             orderbook_score=_ob_score,
+            liq_analysis=_liq_analysis,
         )
 
         # Fear & Greed макро-модификатор — применяем ДО проверки is_valid
