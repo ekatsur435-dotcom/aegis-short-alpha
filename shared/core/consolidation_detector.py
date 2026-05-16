@@ -51,7 +51,20 @@ class ConsolidationResult:
     # Метаданные
     lookback_candles: int
     volatility_compression: bool  # ATR сжался = готовность к импульсу
-    
+
+    # A1: Multi-touch подтверждение уровней
+    support_touches:    int = 0   # Сколько раз цена касалась нижней границы
+    resistance_touches: int = 0   # Сколько раз цена касалась верхней границы
+
+    def get_touch_bonus(self, direction: str) -> int:
+        """Бонус за многократное касание уровня S/R. direction='long'|'short'"""
+        touches = self.support_touches if direction == "long" else self.resistance_touches
+        if touches >= 3:
+            return 15
+        if touches >= 2:
+            return 8
+        return 0
+
     def is_mid_range(self, price: float, buffer: float = 0.15) -> bool:
         """
         Проверяет, находится ли цена в середине диапазона (40-60% = mid).
@@ -165,6 +178,10 @@ class ConsolidationDetector:
         has_breakout_up = current_price > range_high * 1.005  # 0.5% пробой
         has_breakout_down = current_price < range_low * 0.995
         
+        # A1: подсчёт касаний уровней поддержки/сопротивления
+        support_touches    = self.count_level_touches(recent, range_low)
+        resistance_touches = self.count_level_touches(recent, range_high)
+
         return ConsolidationResult(
             is_consolidating=is_consolidating,
             range_high=range_high,
@@ -177,8 +194,29 @@ class ConsolidationDetector:
             has_breakout_down=has_breakout_down,
             lookback_candles=lookback,
             volatility_compression=volatility_compression,
+            support_touches=support_touches,
+            resistance_touches=resistance_touches,
         )
     
+    def count_level_touches(self, candles: List, level_price: float,
+                             tolerance_pct: float = 0.3) -> int:
+        """Считает уникальные касания уровня (cooldown 2 свечи после касания)."""
+        if not candles or level_price <= 0:
+            return 0
+        tol = level_price * tolerance_pct / 100
+        touches = 0
+        cooldown = 0
+        for c in candles:
+            if cooldown > 0:
+                cooldown -= 1
+                continue
+            lo = getattr(c, "low", 0)
+            hi = getattr(c, "high", 0)
+            if abs(lo - level_price) <= tol or abs(hi - level_price) <= tol:
+                touches += 1
+                cooldown = 2
+        return touches
+
     def _check_atr_compression(self, candles: List) -> bool:
         """Проверяет сжатие ATR (подготовка к импульсу)."""
         if len(candles) < 30:
