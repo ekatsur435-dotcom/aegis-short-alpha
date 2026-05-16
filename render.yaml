@@ -71,6 +71,12 @@ services:
         value: "1000"          # Капитал счёта в USD (для расчёта размера позиции)
       - key: MAX_CONSECUTIVE_LOSSES
         value: "3"             # Стоп торговли после N подряд убытков
+      - key: Z_GATE_NEAR_MISS_Z_MIN
+        value: "6.0"           # C6: z≥6+base≥65 → bypass gate (REDUSDT z=7.0 тип)
+      - key: Z_GATE_HIGH_SCORE_BYPASS_MIN
+        value: "80"            # C6: base≥80+z≥2 → bypass gate (FIDAUSDT score=98 тип)
+      - key: Z_GATE_SYSTEMIC_BTC_PCT
+        value: "5.0"           # C6: BTC ±X%/1h → systemic move bypass
       - key: RISK_PER_TRADE
         value: "0.001"
       - key: MAX_POSITION_PCT
@@ -233,6 +239,12 @@ services:
         value: "true"          # Использовать ATR для расчёта SL
       - key: ENABLE_MOMENTUM_LONG
         value: "true"          # Bypass z_volume gate для momentum LONG
+      - key: Z_GATE_NEAR_MISS_Z_MIN
+        value: "6.0"           # C6: z≥6+base≥65 → bypass gate (REDUSDT z=7.0 тип)
+      - key: Z_GATE_HIGH_SCORE_BYPASS_MIN
+        value: "80"            # C6: base≥80+z≥2 → bypass gate (FIDAUSDT score=98 тип)
+      - key: Z_GATE_SYSTEMIC_BTC_PCT
+        value: "5.0"           # C6: BTC -X%/1h → systemic crash bypass (LONG)
       - key: RISK_PER_TRADE
         value: "0.001"
       - key: MAX_POSITION_PCT
