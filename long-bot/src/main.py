@@ -253,6 +253,9 @@ class BotState:
         self.signals_db        = None
         self._signal_db_map: dict = {}
         self.trade_analytics   = None
+        # Signal Queue + Trade Manager
+        self.signal_queue      = None
+        self.trade_manager     = None
 
 
 state = BotState()
@@ -431,6 +434,15 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         print(f"⚠️ SignalsDB init error: {_e}")
 
+    try:
+        from core.signal_queue import get_signal_queue
+        from execution.trade_manager import get_trade_manager
+        state.signal_queue  = get_signal_queue()
+        state.trade_manager = get_trade_manager()
+        print("✅ SignalQueue + TradeManager: инициализированы")
+    except Exception as _e:
+        print(f"⚠️ SignalQueue/TradeManager init: {_e}")
+
     print(f"✅ Aegis Long Engine: {'ON' if state.signal_engine else 'OFF'} | "
           f"Wyckoff: {'ON' if state.wyckoff_detector else 'OFF'} | "
           f"BSL: {'ON' if state.bsl_scanner else 'OFF'}")
@@ -557,6 +569,20 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
 
+        # trade_manager: закрытие позиции → обновление TP/Win статистики
+        if state.trade_manager:
+            try:
+                _ct = record.get("close_type", "SL")
+                _close_price = float(record.get("close_price", 0))
+                _reason = "SL_HIT" if _ct == "SL" else "TRAIL_STOP" if _ct == "TRAIL" else "CLOSED"
+                _open_pos = state.trade_manager.get_open_positions()
+                for _tm_pos in _open_pos:
+                    if _tm_pos.symbol == _sym:
+                        state.trade_manager._close_position(_tm_pos.trade_id, _reason, _close_price)
+                        break
+            except Exception:
+                pass
+
     state.tracker = PositionTracker(
         bot_type=Config.BOT_TYPE, telegram=state.telegram,
         redis_client=state.redis, binance_client=state.binance,
@@ -583,6 +609,33 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_fear_greed_task())       # 🆕 F&G polling
     asyncio.create_task(_startup_sl_sync())       # 🚨 FIX: SL=0 bug sync
     asyncio.create_task(_watchlist_refresh_task()) # ✅ C3: watchlist auto-refresh
+
+    # SignalQueue: retry processor для failed execute_signal
+    if state.signal_queue:
+        async def _execute_queued_signal(sq_sig) -> bool:
+            if not state.auto_trader:
+                return False
+            try:
+                sig_dict = sq_sig.indicators if isinstance(sq_sig.indicators, dict) else {}
+                if not sig_dict or not sig_dict.get("entry_price"):
+                    return False
+                result = await state.auto_trader.execute_signal(sig_dict)
+                if result and state.trade_manager:
+                    try:
+                        _lev = int(str(Config.LEVERAGE).split("-")[0])
+                        state.trade_manager.create_position(
+                            symbol=sq_sig.symbol, direction="LONG",
+                            entry_price=sig_dict.get("entry_price", 0),
+                            qty=float(result.get("qty", 0)) if isinstance(result, dict) else 0.0,
+                            stop_loss=sig_dict.get("stop_loss", 0), leverage=_lev,
+                        )
+                    except Exception:
+                        pass
+                return result is not None
+            except Exception as _e:
+                print(f"[SignalQueue] retry failed {sq_sig.symbol}: {_e}")
+                return False
+        await state.signal_queue.start_processing(_execute_queued_signal)
 
     yield
 
@@ -1530,10 +1583,25 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             strength = aegis_signal.strength.value if aegis_signal else "N/A"
             state.performance_tracker.record_signal(symbol, final_score, strength, "long")
 
+        # ── TradeManager: оптимизация SL/TP по liquidation magnets ──
+        _liq_opt_reasons = []
+        if state.trade_manager and _liq_analysis:
+            try:
+                _tp1_price = take_profits[0][0] if take_profits else entry_price * 1.03
+                stop_loss, _tp1_price, _liq_opt_reasons = state.trade_manager.optimize_levels_with_liquidation(
+                    direction="LONG", entry_price=entry_price,
+                    default_sl=stop_loss, default_tp=_tp1_price, liq_analysis=_liq_analysis,
+                )
+                if _liq_opt_reasons:
+                    print(f"{log_prefix} 🧲 [LIQ-OPT] {' | '.join(_liq_opt_reasons)}")
+            except Exception as _loe:
+                print(f"[TradeManager] liq_opt error {symbol}: {_loe}")
+
         reasons = list(base_result.reasons)
         reasons.extend(rt_result.factors)
         if aegis_signal:
             reasons.extend(aegis_signal.reasons[:6])
+        reasons.extend(_liq_opt_reasons)
 
         return {
             "symbol":       symbol,
@@ -1594,6 +1662,30 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
 
         if verbose:
             print(f"🟢 [SIGNAL-LONG] {symbol}: score={final_score:.1f} — сигнал создан!")
+
+        # signals_db: сохраняем сигнал для аналитики
+        if state.signals_db:
+            try:
+                from database.signals_db import SignalRecord
+                _dt = __import__("datetime").datetime
+                _sid = state.signals_db.save_signal(SignalRecord(
+                    id=None,
+                    timestamp=_dt.utcnow(),
+                    symbol=symbol,
+                    direction="long",
+                    timeframe="15m",
+                    score=int(final_score),
+                    confidence=final_score / 100,
+                    entry_price=signal.get("entry_price", 0),
+                    stop_loss=signal.get("stop_loss", 0),
+                    take_profit=signal.get("take_profit_1", 0),
+                    reasons=", ".join(reasons[:8]),
+                    extra={},
+                ))
+                state._signal_db_map[symbol] = _sid
+            except Exception as _sde:
+                print(f"[signals_db] save error {symbol}: {_sde}")
+
         return signal
 
     except Exception as e:
@@ -1842,8 +1934,38 @@ async def scan_market():
                         if trade_result:
                             active_count += 1
                             exchange_full = active_count >= Config.MAX_POSITIONS
+                            # TradeManager: запись открытой позиции для TP-статистики
+                            if state.trade_manager:
+                                try:
+                                    _lev = int(str(Config.LEVERAGE).split("-")[0])
+                                    _qty = float(trade_result.get("qty", 0)) if isinstance(trade_result, dict) else 0.0
+                                    state.trade_manager.create_position(
+                                        symbol=symbol, direction="LONG",
+                                        entry_price=signal.get("entry_price", signal.get("price", 0)),
+                                        qty=_qty, stop_loss=signal.get("stop_loss", 0), leverage=_lev,
+                                    )
+                                except Exception as _tme:
+                                    print(f"[TradeManager] create_position {symbol}: {_tme}")
                     except Exception as e:
                         print(f"AutoTrader error {symbol}: {e}")
+                        # SignalQueue: повторная попытка с exponential backoff (max 3)
+                        if state.signal_queue:
+                            try:
+                                _tps = signal.get("take_profits", [])
+                                state.signal_queue.add_from_detection(
+                                    symbol=symbol, direction="LONG",
+                                    score=int(signal.get("score", 0)),
+                                    price=float(signal.get("price", 0)),
+                                    pattern=signal.get("pattern", ""),
+                                    indicators=signal,
+                                    entry=signal.get("entry_price", 0),
+                                    stop_loss=signal.get("stop_loss", 0),
+                                    take_profits=_tps if isinstance(_tps, list) else [],
+                                    leverage=str(Config.LEVERAGE), risk="Kelly-sized",
+                                )
+                                print(f"[SignalQueue] {symbol} LONG → очередь retry")
+                            except Exception as _qe:
+                                print(f"[SignalQueue] queue error {symbol}: {_qe}")
                 new_signals += 1
             else:
                 tg_only_count += 1
@@ -1993,6 +2115,37 @@ async def _startup_sl_sync():
 
             if entry <= 0:
                 skipped += 1
+                continue
+
+            # ✅ FIX: BingX может вернуть stop_loss=0 пока реальный STOP_MARKET ордер уже есть.
+            # Проверяем открытые ордера явно, чтобы не создавать дублирующий SL.
+            _existing_sl_orders = []
+            try:
+                _oo_result = await state.auto_trader.bingx._make_request(
+                    "GET", "/openApi/swap/v2/trade/openOrders",
+                    params={"symbol": sym}
+                )
+                if _oo_result and _oo_result.get("code") == 0:
+                    _all_orders = _oo_result.get("data", {}).get("orders", [])
+                    _existing_sl_orders = [
+                        o for o in _all_orders
+                        if o.get("type") in ("STOP_MARKET", "STOP")
+                        and o.get("positionSide") == "LONG"
+                    ]
+            except Exception as _oe:
+                print(f"[SL-SYNC] ⚠️ {sym}: ошибка запроса ордеров: {_oe}")
+
+            if _existing_sl_orders:
+                _sl_price = float(_existing_sl_orders[0].get("stopPrice", 0))
+                print(f"[SL-SYNC] {sym} LONG: уже есть SL ордер {_sl_price:.6f} — пропускаем (BingX вернул stop_loss=0)")
+                _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
+                try:
+                    _rs_sl = float(_redis_sig.get("stop_loss", 0)) if _redis_sig else 0.0
+                except Exception:
+                    _rs_sl = 0.0
+                if _redis_sig and _rs_sl <= 0 and _sl_price > 0:
+                    _redis_sig["stop_loss"] = _sl_price
+                    state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
                 continue
 
             sl_pct = Config.SL_BUFFER
