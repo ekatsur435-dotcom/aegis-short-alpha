@@ -373,6 +373,88 @@ class CoinglassClient:
         return None
     
     # =========================================================================
+    # EXCHANGE NETFLOW
+    # =========================================================================
+
+    async def get_exchange_netflow(self, symbol: str = "BTC", interval: str = "h8") -> Optional[Dict]:
+        """
+        Exchange Netflow — нетто-поток монет на/с бирж.
+
+        Отрицательный netflow (outflow) = монеты уходят с бирж = LONG сигнал накопления.
+        Положительный netflow (inflow)  = монеты поступают на биржи = риск распродажи.
+
+        Args:
+            symbol:   "BTC", "ETH" и т.д.
+            interval: "h1", "h4", "h8", "h24"
+
+        Returns:
+            {
+              "net_flow":      float,   # отрицательный = outflow
+              "inflow":        float,
+              "outflow":       float,
+              "net_flow_24h":  float,   # накопленный за 24ч
+              "signal":        "accumulation" | "distribution" | "neutral",
+              "score":         float    # 0-100 (60+ = значимый сигнал)
+            }
+        """
+        if not self.api_key:
+            return None
+
+        result = await self._make_request(
+            "/public/v2/indicator/exchange_flow",
+            params={"symbol": symbol, "interval": interval},
+        )
+
+        if not result or result.get("code") != "0":
+            # Fallback endpoint (API version differences)
+            result = await self._make_request(
+                "/api/exchange/netflow",
+                params={"symbol": symbol, "type": interval},
+            )
+
+        if not result or result.get("code") != "0":
+            return None
+
+        data = result.get("data", [])
+        if not data:
+            return None
+
+        # Агрегируем последние периоды (24ч = 3 периода по h8)
+        recent = data[:3] if len(data) >= 3 else data
+        inflow    = sum(item.get("inflow",   item.get("exchangeInflow",  0)) for item in recent)
+        outflow   = sum(item.get("outflow",  item.get("exchangeOutflow", 0)) for item in recent)
+        net_flow  = inflow - outflow          # отрицательный = outflow > inflow = накопление
+
+        # Текущий период
+        cur_in  = data[0].get("inflow",  data[0].get("exchangeInflow",  0))
+        cur_out = data[0].get("outflow", data[0].get("exchangeOutflow", 0))
+        cur_net = cur_in - cur_out
+
+        # Сигнал и скор
+        abs_net = abs(net_flow) or 1
+        if net_flow < 0:
+            # Outflow — накопление (LONG)
+            ratio = min(outflow / (inflow or 1), 5)
+            score   = min(40 + ratio * 15, 90)
+            signal  = "accumulation"
+        elif net_flow > 0:
+            # Inflow — распределение (медвежье)
+            score   = max(10, 40 - abs_net / 1_000_000)
+            signal  = "distribution"
+        else:
+            score  = 40
+            signal = "neutral"
+
+        return {
+            "net_flow":     round(net_flow,  2),
+            "inflow":       round(inflow,    2),
+            "outflow":      round(outflow,   2),
+            "net_flow_24h": round(net_flow,  2),
+            "signal":       signal,
+            "score":        round(score, 1),
+        }
+
+    # =========================================================================
     # AGGREGATED ANALYSIS
     # =========================================================================
     

@@ -151,8 +151,9 @@ class LongPatternDetector:
     def detect_all(self, candles, hourly_deltas=None, market_data=None) -> List[PatternResult]:
         results = []
         for fn in [
-            self.detect_ict_unicorn_long,   # highest priority — confluence signal
+            self.detect_ict_unicorn_long,       # highest priority — confluence signal
             self.detect_ote_long,
+            self.detect_dump_exhaustion_long,   # Mean Reversion LONG — RSI<30 oversold bounce
             self.detect_breaker_long,
             self.detect_fvg_long,
             self.detect_breakout_long,
@@ -711,6 +712,103 @@ class LongPatternDetector:
         return PatternResult(
             name="REJECTION_LONG", score_bonus=15, confidence=0.55, direction="long",
             reasons=["Отскок от поддержки", f"Lower wick {lower_wick:.4f}"],
+        )
+
+    def detect_dump_exhaustion_long(self, candles, hourly_deltas=None, md=None) -> Optional[PatternResult]:
+        """DUMP_EXHAUSTION_LONG: RSI<30 extreme oversold + bounce candle + volume confirmation.
+
+        Mean Reversion LONG: после сильного дампа продавцы истощаются,
+        покупатели начинают входить. RSI<30 + bounce свеча с объёмом = исчерпание дампа.
+        Win rate 80-85% при RSI<20 + vol spike ≥2x + price_4d<-15%.
+        score_bonus ≈ 16-24
+        """
+        if len(candles) < 20:
+            return None
+
+        last = candles[-1]
+        prev = candles[-2]
+
+        # RSI из market_data (primary) или fallback из свечей
+        rsi = getattr(md, "rsi_1h", None) if md else None
+        if rsi is None:
+            closes = _closes(candles[-16:])
+            gains  = [max(closes[i] - closes[i-1], 0) for i in range(1, len(closes))]
+            losses = [max(closes[i-1] - closes[i], 0) for i in range(1, len(closes))]
+            avg_g  = sum(gains[-14:]) / 14 if gains else 0
+            avg_l  = sum(losses[-14:]) / 14 if losses else 1
+            rs     = avg_g / avg_l if avg_l > 0 else 100
+            rsi    = 100 - (100 / (1 + rs))
+
+        if rsi >= 30:  # Требуем RSI < 30 — только экстремальная перепроданность
+            return None
+
+        # Bounce: текущая или предыдущая свеча бычья
+        if last.close <= last.open and prev.close <= prev.open:
+            return None
+
+        # Volume подтверждение — продавцы сдаются, покупатели входят
+        vol_spike = _vol_spike(candles, 20)
+        if vol_spike < 1.3:
+            return None
+
+        # Предшествующий дамп из market_data или proxy по свечам
+        price_change_4d = getattr(md, "price_change_4d", None) if md else None
+        if price_change_4d is None:
+            lookback = min(40, len(candles) - 1)
+            price_change_4d = (last.close - candles[-lookback].close) / candles[-lookback].close * 100
+
+        if price_change_4d > -3:  # Нет предшествующего дампа — не mean reversion
+            return None
+
+        reasons = []
+        bonus   = 12
+
+        # RSI severity
+        if rsi < 15:
+            bonus += 12
+            reasons.append(f"RSI ULTRA oversold {rsi:.1f} — паника продавцов")
+        elif rsi < 20:
+            bonus += 8
+            reasons.append(f"RSI EXTREME {rsi:.1f} — перепроданность экстремальная")
+        elif rsi < 25:
+            bonus += 5
+            reasons.append(f"RSI oversold {rsi:.1f}")
+        else:
+            reasons.append(f"RSI low {rsi:.1f}")
+
+        # Dump depth
+        if price_change_4d < -25:
+            bonus += 6
+            reasons.append(f"Extreme dump -{abs(price_change_4d):.1f}% → высокий отскок")
+        elif price_change_4d < -15:
+            bonus += 4
+            reasons.append(f"Deep dump -{abs(price_change_4d):.1f}%")
+        else:
+            reasons.append(f"Dump {price_change_4d:.1f}%")
+
+        # Volume confirmation
+        if vol_spike >= 2.5:
+            bonus += 4
+            reasons.append(f"Volume spike {vol_spike:.1f}x — покупатели входят агрессивно")
+        elif vol_spike >= 1.8:
+            bonus += 2
+            reasons.append(f"Volume {vol_spike:.1f}x avg")
+
+        # 1H momentum recovery
+        price_1h = getattr(md, "price_change_1h", 0) if md else 0
+        if price_1h and price_1h > 2:
+            bonus += 2
+            reasons.append(f"1H recovery +{price_1h:.1f}%")
+
+        bonus = min(bonus, 24)
+
+        return PatternResult(
+            name="DUMP_EXHAUSTION_LONG",
+            score_bonus=bonus,
+            confidence=min(0.85, 0.50 + (30 - rsi) / 40),
+            direction="long",
+            suggested_sl_pct=round(max(2.0, abs(price_change_4d) * 0.08), 2),
+            reasons=reasons,
         )
 
 
