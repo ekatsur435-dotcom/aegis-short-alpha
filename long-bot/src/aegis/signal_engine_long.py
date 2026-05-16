@@ -41,6 +41,10 @@ _FUNDING_EXTREME_LONG = float(os.getenv("FUNDING_EXTREME_LONG", "-0.05"))   # % 
 _ENABLE_EF_BYPASS_LONG  = os.getenv("ENABLE_EXTREME_FUNDING_BYPASS", "true").lower() == "true"
 _EF_THRESHOLD_LONG      = abs(float(os.getenv("EXTREME_FUNDING_BYPASS_THRESHOLD", "0.05")))  # 0.05 → |funding| ≥ 0.05%
 _EF_MIN_BASE_LONG       = float(os.getenv("EXTREME_FUNDING_BYPASS_MIN_BASE", "65"))          # base ≥ 65
+# C6 Fix: дополнительные bypass-уровни z_volume gate
+_C6_NEAR_MISS_Z        = float(os.getenv("Z_GATE_NEAR_MISS_Z_MIN",       "6.0"))  # z≥6 + base≥65 → bypass
+_C6_HIGH_SCORE_MIN     = float(os.getenv("Z_GATE_HIGH_SCORE_BYPASS_MIN", "80"))   # base≥80 + z≥2 → bypass
+_C6_SYSTEMIC_BTC_PCT   = float(os.getenv("Z_GATE_SYSTEMIC_BTC_PCT",      "5.0"))  # BTC -X%/h → systemic crash
 
 
 class SignalStrengthLong(Enum):
@@ -386,14 +390,15 @@ class AegisLongSignalEngine:
     # ── GENERATE SIGNAL ──────────────────────────────────────────────
     async def generate_signal(
         self,
-        symbol:       str,
-        market_data:  Any,
-        ohlcv_15m:    list,
-        entry_price:  float,
-        stop_loss:    float,
-        sl_pct:       float,
-        take_profits: List[Tuple[float, int]],
-        base_score:   float = 0.0,
+        symbol:        str,
+        market_data:   Any,
+        ohlcv_15m:     list,
+        entry_price:   float,
+        stop_loss:     float,
+        sl_pct:        float,
+        take_profits:  List[Tuple[float, int]],
+        base_score:    float = 0.0,
+        btc_change_1h: float = 0.0,
     ) -> Optional[AegisLongSignal]:
 
         results = await asyncio.gather(
@@ -487,6 +492,25 @@ class AegisLongSignalEngine:
                         f"< {_Z_VOLUME_GATE_MIN} → bypass (funding={_funding_ef:.4f}% "
                         f"base={base_score:.0f})"
                     )
+
+            # C6 Fix: Near-miss / High-Score / Systemic Crash bypass
+            if not _momentum_bypass:
+                _z_raw = z_vol.raw_score if z_vol else 0.0
+                if _z_raw >= _C6_NEAR_MISS_Z and base_score >= 65:
+                    # z близко к порогу (например 6.0/7.0 из 8) + высокий score
+                    _momentum_bypass = True
+                    all_reasons.append(f"C6 NEAR-MISS bypass: z={_z_raw:.1f}≥{_C6_NEAR_MISS_Z} base={base_score:.0f}")
+                    logger.info(f"[AEGIS C6 NEAR-MISS] {symbol}: z={_z_raw:.1f} near gate {_Z_VOLUME_GATE_MIN}, base={base_score:.0f}")
+                elif base_score >= _C6_HIGH_SCORE_MIN and _z_raw >= 2.0:
+                    # Исключительный score (≥80) перевешивает слабый volume при наличии минимальной активности
+                    _momentum_bypass = True
+                    all_reasons.append(f"C6 HIGH-SCORE bypass: base={base_score:.0f}≥{_C6_HIGH_SCORE_MIN} z={_z_raw:.1f}")
+                    logger.info(f"[AEGIS C6 HIGH-SCORE] {symbol}: base={base_score:.0f} exceptional → bypass z_gate")
+                elif btc_change_1h <= -_C6_SYSTEMIC_BTC_PCT and _z_raw >= 1.5:
+                    # Системный краш BTC → объём на лонгируемых монетах нарастает, z_gate слишком строгий
+                    _momentum_bypass = True
+                    all_reasons.append(f"C6 SYSTEMIC CRASH bypass: BTC 1H={btc_change_1h:+.1f}% z={_z_raw:.1f}")
+                    logger.info(f"[AEGIS C6 SYSTEMIC] {symbol}: BTC {btc_change_1h:+.1f}% crash → volume building → bypass")
 
             if not _momentum_bypass:
                 logger.info(

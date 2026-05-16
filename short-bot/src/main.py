@@ -1289,6 +1289,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     sl_pct=sl_pct,
                     take_profits=take_profits,
                     base_score=base_score,
+                    btc_change_1h=float(cached_btc_1h or 0.0),
                 )
                 if aegis_signal:
                     final_score     = aegis_signal.total_score
