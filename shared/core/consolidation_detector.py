@@ -325,9 +325,11 @@ def filter_mid_range(
             # ✅ FIX #4: Экстремальная перегретость важнее позиции в диапазоне
             if rsi_1h > 75:
                 return True, f"SHORT в {status} РАЗРЕШЁН — RSI 1H={rsi_1h:.1f} экстремально перегрет"
-            # ✅ FIX #5: HTF медвежий → SHORT в нижней половине = продолжение тренда (порог снижен до 65)
-            if htf_bearish and rsi_1h > 65:
-                return True, f"SHORT в {status} РАЗРЕШЁН — HTF BEARISH + RSI 1H={rsi_1h:.1f}"
+            # ✅ FIX C5: HTF медвежий → SHORT в нижней половине ВСЕГДА разрешён при RSI < 70
+            # Логика: в медвежьем тренде lower_half — это зона слабости, идеально для шорта.
+            # Старый порог rsi_1h > 65 блокировал шорты при RSI 16-60 в медвежьем тренде (OKBUSDT, BNBUSDT, CETUS).
+            if htf_bearish and rsi_1h < 70:
+                return True, f"SHORT в {status} РАЗРЕШЁН — HTF BEARISH + RSI {rsi_1h:.1f} (не перекуплен)"
             return False, f"SHORT в {status} — плохая зона для входа"
         return True, "upper half"
 

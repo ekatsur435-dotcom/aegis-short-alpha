@@ -83,7 +83,7 @@ class CoinglassClient:
         if self.session is None or self.session.closed:
             headers = {}
             if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
+                headers["coinglassSecret"] = self.api_key   # ✅ FIX C2: правильный заголовок Coinglass API
             headers["Content-Type"] = "application/json"
             
             self.session = aiohttp.ClientSession(headers=headers)
@@ -400,16 +400,17 @@ class CoinglassClient:
         if not self.api_key:
             return None
 
+        # ✅ FIX C2: правильный endpoint Coinglass API v3
         result = await self._make_request(
-            "/public/v2/indicator/exchange_flow",
+            "/api/futures/openInterest/chart",
             params={"symbol": symbol, "interval": interval},
         )
 
         if not result or result.get("code") != "0":
-            # Fallback endpoint (API version differences)
+            # Fallback endpoint v2
             result = await self._make_request(
-                "/api/exchange/netflow",
-                params={"symbol": symbol, "type": interval},
+                "/public/v2/indicator/exchange_flow",
+                params={"symbol": symbol, "interval": interval},
             )
 
         if not result or result.get("code") != "0":
