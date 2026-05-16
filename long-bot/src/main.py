@@ -1234,10 +1234,11 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     if verbose:
                         print(f"{log_prefix} 📐 [ATR SL] ATR={_atr:.6f} × {Config.ATR_SL_MULT} → SL={stop_loss:.6f} ({_atr_sl_pct:.2f}%)")
                 else:
-                    stop_loss = price * (1 - max(Config.ATR_SL_MIN, min(Config.ATR_SL_MAX, _atr_sl_pct)) / 100)
+                    # ✅ FIX C7: была двойная запись — строка ниже перезаписывала ATR-clamped SL
+                    _clamped_pct = max(Config.ATR_SL_MIN, min(Config.ATR_SL_MAX, _atr_sl_pct))
+                    stop_loss = price * (1 - _clamped_pct / 100)
                     if verbose:
-                        print(f"{log_prefix} 📐 [ATR SL] clamped: ATR-SL={_atr_sl_pct:.2f}% → clamped to {Config.SL_BUFFER}%")
-                    stop_loss = price * (1 - Config.SL_BUFFER / 100)
+                        print(f"{log_prefix} 📐 [ATR SL] clamped: ATR-SL={_atr_sl_pct:.2f}% → clamped to {_clamped_pct:.2f}%")
             except Exception as _e:
                 if verbose:
                     print(f"{log_prefix} ⚠️ [ATR SL] error: {_e} → fallback fixed %")

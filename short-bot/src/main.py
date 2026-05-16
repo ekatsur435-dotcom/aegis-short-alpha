@@ -1812,7 +1812,7 @@ async def _startup_sl_sync():
                     state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
                 # Деdup-ключ: не дублировать в течение 10 мин
                 try:
-                    state.redis._client.setex(_dedup_key, 600, "1")
+                    state.redis.client.setex(_dedup_key, 600, "1")  # ✅ FIX C1
                 except Exception:
                     pass
                 # Уведомляем в TG
@@ -1871,8 +1871,8 @@ async def _daily_report_task():
                 # ✅ FIX: cmd_daily_report на TelegramCommandHandler, не TelegramBot
                 if hasattr(state.telegram, "cmd_daily_report"):
                     await state.telegram.cmd_daily_report("", state.telegram.chat_id)
-                elif state.telegram_handler and hasattr(state.telegram_handler, "cmd_daily_report"):
-                    await state.telegram_handler.cmd_daily_report("", state.telegram.chat_id)
+                elif hasattr(state, "cmd_handler") and state.cmd_handler and hasattr(state.cmd_handler, "cmd_daily_report"):
+                    await state.cmd_handler.cmd_daily_report("", state.telegram.chat_id)  # ✅ FIX C2
                 else:
                     await state.telegram._send_daily_report() if hasattr(state.telegram, "_send_daily_report") else None
                 print("✅ Daily report sent (Redis-based)")
