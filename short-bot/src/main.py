@@ -701,6 +701,17 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         elif state.redis and state.redis.client.exists(f"skip:nodata:{symbol}"):
             return None
 
+        # ✅ SL cooldown: не открываем повторно если стоп был < SL_COOLDOWN_HOURS назад
+        _sl_cd_h = float(os.getenv("SL_COOLDOWN_HOURS", "1.0"))
+        _sl_cd_key = f"sl_cooldown:short:{symbol.replace('-', '')}"
+        try:
+            if state.redis and state.redis.client.exists(_sl_cd_key):
+                if verbose:
+                    print(f"{log_prefix} 🚫 [SL_COOLDOWN] {symbol}: стоп был недавно — ждём {_sl_cd_h}ч")
+                return None
+        except Exception:
+            pass
+
         md = await state.binance.get_complete_market_data(symbol)
         if not md:
             # П1: Попробовать альтернативный формат (SPACE-USDT для OKX)
@@ -2042,10 +2053,39 @@ async def _startup_sl_sync():
             if p.stop_loss and p.stop_loss > 0:
                 # SL есть на бирже — только синкуем Redis если пустой
                 _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
-                if _redis_sig and _f(_redis_sig.get("stop_loss", 0)) <= 0:
-                    _redis_sig["stop_loss"] = p.stop_loss
-                    state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
-                    print(f"[SL-SYNC] {sym} SHORT: Redis SL пустой, записан {p.stop_loss:.6f} с биржи")
+                if _redis_sig:
+                    _changed = False
+                    if _f(_redis_sig.get("stop_loss", 0)) <= 0:
+                        _redis_sig["stop_loss"] = p.stop_loss
+                        _changed = True
+                        print(f"[SL-SYNC] {sym} SHORT: Redis SL пустой, записан {p.stop_loss:.6f} с биржи")
+                    # ✅ Enrichment: восстанавливаем take_profits из открытых TP ордеров если пусто
+                    _rs_tps = _redis_sig.get("take_profits")
+                    if not _rs_tps:
+                        try:
+                            _tp_result = await state.auto_trader.bingx._make_request(
+                                "GET", "/openApi/swap/v2/trade/openOrders", params={"symbol": sym}
+                            )
+                            if _tp_result and _tp_result.get("code") == 0:
+                                _tp_orders = [
+                                    o for o in (_tp_result.get("data", {}).get("orders", []))
+                                    if o.get("type") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT", "LIMIT")
+                                    and o.get("positionSide") == "SHORT"
+                                    and o.get("side") == "BUY"
+                                ]
+                                if _tp_orders:
+                                    _tp_prices = sorted(
+                                        float(o.get("stopPrice") or o.get("price", 0))
+                                        for o in _tp_orders if float(o.get("stopPrice") or o.get("price", 0)) > 0
+                                    )
+                                    _w = round(100 / len(_tp_prices)) if _tp_prices else 25
+                                    _redis_sig["take_profits"] = [[_pr, _w] for _pr in _tp_prices]
+                                    _changed = True
+                                    print(f"[SL-SYNC] {sym} SHORT: take_profits восстановлены из {len(_tp_prices)} TP ордеров")
+                        except Exception as _tp_e:
+                            print(f"[SL-SYNC] {sym}: TP enrichment error: {_tp_e}")
+                    if _changed:
+                        state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
                 continue
 
             # SL отсутствует на бирже — рассчитываем аварийный

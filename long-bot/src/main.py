@@ -2185,14 +2185,42 @@ async def _startup_sl_sync():
                 # SL есть на бирже — только синкуем Redis если пустой
                 _redis_sig = state.redis.get_position(Config.BOT_TYPE, sym.replace("-", ""))
                 if _redis_sig:
+                    _changed = False
                     try:
                         _rs_sl = float(_redis_sig.get("stop_loss", 0))
                     except Exception:
                         _rs_sl = 0.0
                     if _rs_sl <= 0:
                         _redis_sig["stop_loss"] = p.stop_loss
-                        state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
+                        _changed = True
                         print(f"[SL-SYNC] {sym} LONG: Redis SL обновлён с биржи → {p.stop_loss:.6f}")
+                    # ✅ Enrichment: восстанавливаем take_profits из открытых TP ордеров если пусто
+                    _rs_tps = _redis_sig.get("take_profits")
+                    if not _rs_tps:
+                        try:
+                            _tp_result = await state.auto_trader.bingx._make_request(
+                                "GET", "/openApi/swap/v2/trade/openOrders", params={"symbol": sym}
+                            )
+                            if _tp_result and _tp_result.get("code") == 0:
+                                _tp_orders = [
+                                    o for o in (_tp_result.get("data", {}).get("orders", []))
+                                    if o.get("type") in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT", "LIMIT")
+                                    and o.get("positionSide") == "LONG"
+                                    and o.get("side") == "SELL"
+                                ]
+                                if _tp_orders:
+                                    _tp_prices = sorted(
+                                        float(o.get("stopPrice") or o.get("price", 0))
+                                        for o in _tp_orders if float(o.get("stopPrice") or o.get("price", 0)) > 0
+                                    )
+                                    _w = round(100 / len(_tp_prices)) if _tp_prices else 25
+                                    _redis_sig["take_profits"] = [[_pr, _w] for _pr in _tp_prices]
+                                    _changed = True
+                                    print(f"[SL-SYNC] {sym} LONG: take_profits восстановлены из {len(_tp_prices)} TP ордеров")
+                        except Exception as _tp_e:
+                            print(f"[SL-SYNC] {sym}: TP enrichment error: {_tp_e}")
+                    if _changed:
+                        state.redis.save_position(Config.BOT_TYPE, sym.replace("-", ""), _redis_sig)
                 continue
 
             if entry <= 0:
