@@ -1,106 +1,96 @@
 """
-Netflow Analyzer Long v1.0
-Exchange Netflow из CoinGlass → LONG сигнал накопления.
+NetflowAnalyzerLong v1.0
+Анализ потоков монет на/с бирж (Coinglass).
 
 Логика:
-  Отрицательный netflow (outflow) = монеты уходят с бирж в cold wallets = институциональное накопление.
-  Накопление → уменьшение supply на биржах → price pressure вверх.
+  Outflow (монеты УХОДЯТ с биржи) = институциональное накопление = BULLISH → LONG
+  Inflow  (монеты ПРИХОДЯТ на биржу) = распределение / подготовка к продаже = BEARISH
 
-Данные: CoinGlass /public/v2/indicator/exchange_flow
+Используется в AegisLongSignalEngine как компонент OI/накопление.
 """
-
-from __future__ import annotations
 import logging
-import os
-from typing import Any, Dict, Optional
+from typing import Dict, Any, Optional
 
-logger = logging.getLogger("aegis.netflow_analyzer")
-
-_COINGLASS_KEY = os.getenv("COINGLASS_API_KEY", "")
+logger = logging.getLogger(__name__)
 
 
 class NetflowAnalyzerLong:
     """
-    Анализ Exchange Netflow (CoinGlass) для LONG сигналов.
-    Outflow с бирж = накопление = бычий сигнал.
+    Анализирует exchange netflow с Coinglass.
+    Возвращает score 0-100: выше = сильнее outflow = накопление = LONG.
     """
 
     def __init__(self, coinglass_client=None):
-        self._client = coinglass_client
-        self._cache: Dict[str, Dict] = {}
-        self._cache_ttl = 3600  # 1 час — netflow меняется медленно
-        self._last_fetch: Dict[str, float] = {}
+        self.client = coinglass_client
 
-    async def analyze(self, symbol: str) -> Dict:
-        import time
+    async def analyze(self, symbol: str) -> Dict[str, Any]:
+        """
+        Возвращает dict совместимый с AegisLongSignalEngine:
+          score:    0-100
+          reasons:  list[str]
+          metadata: {"signal": str, "total_netflow": float, ...}
+        """
+        result: Dict[str, Any] = {
+            "score": 40,
+            "reasons": [],
+            "metadata": {"signal": "neutral"},
+        }
 
-        # Кэш: netflow дорогой запрос, обновляем раз в час
-        now = time.time()
-        if symbol in self._cache and (now - self._last_fetch.get(symbol, 0)) < self._cache_ttl:
-            return self._cache[symbol]
-
-        result = await self._fetch(symbol)
-        self._cache[symbol] = result
-        self._last_fetch[symbol] = now
-        return result
-
-    async def _fetch(self, symbol: str) -> Dict:
-        reasons = []
-        score   = 40.0  # neutral baseline
-
-        if not _COINGLASS_KEY:
-            return {"score": score, "reasons": ["Netflow: COINGLASS_API_KEY не задан"], "metadata": {}}
-
-        if self._client is None:
-            try:
-                from shared.api.coinglass_client import get_coinglass_client
-                self._client = get_coinglass_client()
-            except ImportError:
-                try:
-                    import sys, os as _os
-                    sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "shared"))
-                    from api.coinglass_client import get_coinglass_client
-                    self._client = get_coinglass_client()
-                except Exception:
-                    return {"score": score, "reasons": ["Netflow: CoinGlass client недоступен"], "metadata": {}}
+        if not self.client:
+            return result
 
         try:
-            # Базовый тикер без USDT (BTC, ETH, etc.)
-            base = symbol.replace("USDT", "").replace("PERP", "").replace("-", "")
-            data = await self._client.get_exchange_netflow(base, interval="h8")
-        except Exception as e:
-            logger.warning(f"[Netflow] {symbol}: ошибка запроса — {e}")
-            return {"score": score, "reasons": [f"Netflow: ошибка API"], "metadata": {}}
+            nf = await self.client.get_exchange_netflow(symbol, period="8h")
+            if not nf:
+                return result
 
-        if not data:
-            return {"score": score, "reasons": ["Netflow: нет данных"], "metadata": {}}
+            total = nf.get("total_netflow", 0.0)
+            inflow  = nf.get("inflow",  0.0)
+            outflow = nf.get("outflow", 0.0)
+            ex_cnt  = nf.get("exchange_count", 0)
 
-        net_flow = data.get("net_flow", 0)
-        signal   = data.get("signal", "neutral")
-        cg_score = data.get("score", 40)
+            # total_netflow: inflow - outflow
+            # Отрицательный = outflow превышает inflow = BULLISH для LONG
+            net = total  # отрицательный = outflow-dominant
 
-        if signal == "accumulation":
-            score = cg_score
-            if cg_score >= 75:
-                reasons.append(f"📦 STRONG OUTFLOW: монеты уходят с бирж — институциональное накопление")
-            elif cg_score >= 55:
-                reasons.append(f"📦 Outflow ({net_flow:+.0f}) — умеренное накопление")
+            if net < -5_000_000:       # > $5M outflow
+                score, signal = 90, "strong_outflow"
+                result["reasons"].append(
+                    f"Институциональный outflow: ${abs(net)/1e6:.1f}M с бирж — накопление"
+                )
+            elif net < -1_000_000:     # > $1M outflow
+                score, signal = 75, "outflow"
+                result["reasons"].append(
+                    f"Outflow с бирж: ${abs(net)/1e6:.1f}M — накопление"
+                )
+            elif net < -200_000:       # > $200K outflow
+                score, signal = 60, "mild_outflow"
+                result["reasons"].append(
+                    f"Слабый outflow: ${abs(net)/1e3:.0f}K с бирж"
+                )
+            elif net > 5_000_000:      # > $5M inflow = сильное давление продаж
+                score, signal = 10, "strong_inflow"
+                result["reasons"].append(
+                    f"Сильный inflow на биржи: ${net/1e6:.1f}M — распределение"
+                )
+            elif net > 1_000_000:
+                score, signal = 25, "inflow"
+                result["reasons"].append(
+                    f"Inflow на биржи: ${net/1e6:.1f}M — распределение"
+                )
             else:
-                reasons.append(f"Netflow нейтральный с outflow уклоном")
-        elif signal == "distribution":
-            score = max(10, 40 - abs(net_flow) / 5_000_000)
-            reasons.append(f"⚠️ Inflow на биржи ({net_flow:+.0f}) — осторожно для LONG")
-        else:
-            score = 40
-            reasons.append("Netflow нейтральный")
+                score, signal = 40, "neutral"
 
-        return {
-            "score":   round(min(score, 100), 1),
-            "reasons": reasons,
-            "metadata": {
-                "net_flow":  net_flow,
-                "inflow":    data.get("inflow", 0),
-                "outflow":   data.get("outflow", 0),
-                "signal":    signal,
-            },
-        }
+            result["score"] = score
+            result["metadata"] = {
+                "signal":       signal,
+                "total_netflow": round(net, 0),
+                "inflow":        round(inflow, 0),
+                "outflow":       round(outflow, 0),
+                "exchanges":     ex_cnt,
+            }
+
+        except Exception as e:
+            logger.debug(f"[NetflowAnalyzer] Error for {symbol}: {e}")
+
+        return result

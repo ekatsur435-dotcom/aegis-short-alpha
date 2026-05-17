@@ -1034,18 +1034,32 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 print(f"{log_prefix} 🏗 [MS STRUCTURE] {format_ms_summary(_ms_log)}")
         # ─────────────────────────────────────────────────────────────
 
-        # 🆕 OKX Liquidations fallback — ПЕРЕД скорером, чтобы данные попали в md
+        # OKX Liquidations fallback (WebSocket→Redis, реальные данные)
         if md.recent_liquidations_usd is None or md.liq_side is None:
             try:
-                from api.okx_client import get_okx_client
-                okx_liq = await get_okx_client().get_liquidations(symbol)
+                from utils.okx_liquidation_ws import get_okx_liq_from_redis
+                okx_liq = get_okx_liq_from_redis(state.redis, symbol)
                 if okx_liq:
                     md.recent_liquidations_usd = okx_liq["total_usd"]
-                    md.liq_side = okx_liq["dominant_side"]
+                    md.liq_side = okx_liq.get("dominant_side")  # "LONG" | "SHORT" — совместимо со скорером
                     if verbose:
-                        print(f"{log_prefix} 🔄 [OKX_LIQ] fallback: {okx_liq['dominant_side']} ${okx_liq['total_usd']:.0f}")
+                        print(f"{log_prefix} 🔄 [OKX_LIQ] WS cache: {okx_liq.get('dominant_side')} ${okx_liq['total_usd']:.0f}")
             except Exception:
                 pass
+
+        # OKX OI cross-exchange — заполняет пробелы если Binance/Bybit вернули 0
+        try:
+            from api.okx_client import get_okx_client
+            _okx_oi = await get_okx_client().get_open_interest(symbol)
+            if _okx_oi:
+                if not md.oi_change_1h:
+                    md.oi_change_1h = _okx_oi.oi_change_1h
+                if not getattr(md, 'oi_change_4h', 0.0):
+                    md.oi_change_4h = _okx_oi.oi_change_4h
+                if not md.funding_rate:
+                    md.funding_rate = _okx_oi.funding_rate
+        except Exception:
+            pass
 
         # Multi-TF RSI и OI для scorer
         _rsi_15m = _calc_rsi(ohlcv_15m) if ohlcv_15m else None

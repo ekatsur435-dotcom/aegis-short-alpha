@@ -118,7 +118,7 @@ from detectors.bsl_scanner import BSLScanner
 from detectors.oi_analyzer_long import OIAnalyzerLong, FundingConfigLong
 from detectors.liquidation_mapper_long import LiquidationMapperLong
 from detectors.delta_analyzer_long import DeltaAnalyzerLong
-# NetflowAnalyzerLong удалён: требовал Coinglass (HTTP 500) — не используется
+from detectors.netflow_analyzer import NetflowAnalyzerLong
 from core.kill_zone_filter import KillZoneFilter  # #19
 
 
@@ -268,6 +268,7 @@ class BotState:
         self.liq_mapper:          Optional[LiquidationMapperLong]   = None
         self.delta_analyzer:      Optional[DeltaAnalyzerLong]       = None
         self.coinglass            = None
+        self.netflow_analyzer:    Optional[NetflowAnalyzerLong] = None
         self.liq_detector:        Optional[Any] = None
         self.fear_greed_index: Optional[int] = None   # 🆕 0-100
         self.btc_change_1h:    Optional[float] = None  # ✅ FIX #5: кешируем BTC 1h для delta scorer
@@ -411,8 +412,18 @@ async def lifespan(app: FastAPI):
 
     state.liq_mapper = LiquidationMapperLong()
     state.delta_analyzer = DeltaAnalyzerLong()
-    state.coinglass    = None              # Coinglass API отключён (HTTP 500)
-    state.liq_detector = None             # LiquidationZoneDetector требует Coinglass — отключён
+    # Coinglass — exchange netflow (институциональное накопление/распределение)
+    _cg_key = os.getenv("COINGLASS_API_KEY", "")
+    if _cg_key:
+        from api.coinglass_client import CoinglassClient
+        state.coinglass = CoinglassClient(api_key=_cg_key)
+        state.netflow_analyzer = NetflowAnalyzerLong(coinglass_client=state.coinglass)
+        print("✅ NetflowAnalyzerLong включён (Coinglass API key найден)")
+    else:
+        state.coinglass = None
+        state.netflow_analyzer = None
+        print("⚠️ NetflowAnalyzerLong отключён (COINGLASS_API_KEY не задан)")
+    state.liq_detector = None  # LiquidationZoneDetector требует отдельного восстановления
 
     state.signal_engine = AegisLongSignalEngine(
         dump_detector=state.dump_detector,
@@ -421,7 +432,8 @@ async def lifespan(app: FastAPI):
         wyckoff_detector=state.wyckoff_detector,
         delta_analyzer=state.delta_analyzer,
         liq_mapper=state.liq_mapper,
-        min_score=Config.AEGIS_MIN_SCORE,  # ✅ FIX: теперь читает AEGIS_LONG_MIN_SCORE (было MIN_LONG_SCORE=52)
+        netflow_analyzer=state.netflow_analyzer,
+        min_score=Config.AEGIS_MIN_SCORE,
     ) if Config.ENABLE_AEGIS_ENGINE else None
 
     state.dca_engine = SmartDCALongEngine(GridConfigLong(
@@ -740,17 +752,6 @@ async def _get_btc_change_4h() -> Optional[float]:
         return None
 
 
-async def _get_eth_btc_ratio() -> float:
-    """ETH/BTC ratio — индикатор альт-сезона"""
-    try:
-        eth = await state.binance.get_complete_market_data("ETHUSDT")
-        btc = await state.binance.get_complete_market_data("BTCUSDT")
-        if eth and btc and btc.price > 0:
-            return eth.price / btc.price
-        return 0.0
-    except Exception:
-        return 0.0
-
 
 async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbose: bool = True) -> Optional[Dict]:
     """
@@ -1017,18 +1018,32 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         except Exception as _fp_err:
             pass  # не критично
 
-        # OKX Liquidations fallback — ПЕРЕД скорером
+        # OKX Liquidations fallback (WebSocket→Redis, реальные данные)
         if md.recent_liquidations_usd is None or md.liq_side is None:
             try:
-                from api.okx_client import get_okx_client
-                okx_liq = await get_okx_client().get_liquidations(symbol)
+                from utils.okx_liquidation_ws import get_okx_liq_from_redis
+                okx_liq = get_okx_liq_from_redis(state.redis, symbol)
                 if okx_liq:
                     md.recent_liquidations_usd = okx_liq["total_usd"]
-                    md.liq_side = okx_liq["dominant_side"]
+                    md.liq_side = okx_liq.get("dominant_side")  # "LONG" | "SHORT" — совместимо со скорером
                     if verbose:
-                        print(f"{log_prefix} 🔄 [OKX_LIQ] fallback: {okx_liq['dominant_side']} ${okx_liq['total_usd']:.0f}")
+                        print(f"{log_prefix} 🔄 [OKX_LIQ] WS cache: {okx_liq.get('dominant_side')} ${okx_liq['total_usd']:.0f}")
             except Exception:
                 pass
+
+        # OKX OI cross-exchange — заполняет пробелы если Binance/Bybit вернули 0
+        try:
+            from api.okx_client import get_okx_client
+            _okx_oi = await get_okx_client().get_open_interest(symbol)
+            if _okx_oi:
+                if not md.oi_change_1h:
+                    md.oi_change_1h = _okx_oi.oi_change_1h
+                if not getattr(md, 'oi_change_4h', 0.0):
+                    md.oi_change_4h = _okx_oi.oi_change_4h
+                if not md.funding_rate:
+                    md.funding_rate = _okx_oi.funding_rate
+        except Exception:
+            pass
 
         # Multi-TF RSI и OI для scorer
         _rsi_15m = _calc_rsi_l(ohlcv_15m) if ohlcv_15m else None
@@ -2403,11 +2418,6 @@ async def _startup_sl_sync():
         print(f"[SL-SYNC] ❌ Ошибка: {e}\n{traceback.format_exc()}")
 
 
-def _f(v) -> float:
-    try:   return float(v)
-    except: return 0.0
-
-
 async def _fear_greed_task():
     """Fear & Greed Index polling — обновляем каждые 30 мин (alternative.me, без ключа)."""
     from core.fear_greed import get_fear_greed
@@ -2436,10 +2446,8 @@ async def _daily_report_task():
                 # ✅ FIX: cmd_daily_report на TelegramCommandHandler, не TelegramBot
                 if hasattr(state.telegram, "cmd_daily_report"):
                     await state.telegram.cmd_daily_report("", state.telegram.chat_id)
-                elif state.telegram_handler and hasattr(state.telegram_handler, "cmd_daily_report"):
-                    await state.telegram_handler.cmd_daily_report("", state.telegram.chat_id)
-                else:
-                    await state.telegram._send_daily_report() if hasattr(state.telegram, "_send_daily_report") else None
+                elif hasattr(state.telegram, "_send_daily_report"):
+                    await state.telegram._send_daily_report()
                 print("✅ Daily report sent (Redis-based)")
                 # PerformanceTracker: Sharpe / PF / MaxDD (in-RAM stats)
                 if state.performance_tracker:
