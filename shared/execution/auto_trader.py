@@ -238,17 +238,30 @@ class AutoTrader:
             print(f"{pfx} ❌ get_positions failed: {e}")
             return None
 
-        n_pos    = len(current_positions)
+        # Считаем только позиции ЭТОГО направления (LONG-бот → только LONG, SHORT-бот → только SHORT)
+        _dir_side = "LONG" if direction == "long" else "SHORT"
+        dir_positions = [
+            p for p in current_positions
+            if (
+                getattr(p, "position_side", "").upper() == _dir_side
+                or getattr(p, "positionSide", "").upper() == _dir_side
+                or getattr(p, "side", "").upper() == _dir_side
+                or (direction == "long"  and getattr(p, "direction", "").upper() == "BUY")
+                or (direction == "short" and getattr(p, "direction", "").upper() == "SELL")
+            ) and abs(getattr(p, "size", 0) or 0) > 0
+        ]
+        n_pos    = len(dir_positions)
+        n_total  = len(current_positions)
         pos_list = " | ".join(f"{p.symbol}({p.side})" for p in current_positions)
-        print(f"{pfx} 📊 Open: {n_pos}/{self.config.max_positions}")
+        print(f"{pfx} 📊 Open: {n_pos}/{self.config.max_positions} {_dir_side} ({n_total} total)")
         if pos_list:
             print(f"{pfx} 📋 {pos_list}")
 
         if n_pos >= self.config.max_positions:
-            print(f"{pfx} ⏸ SKIP — max positions")
+            print(f"{pfx} ⏸ SKIP — max {_dir_side} positions")
             safe_symbol = _escape_value(symbol)
             await self._tg_reply(
-                f"⏸ <b>Биржа заполнена</b> ({n_pos}/{self.config.max_positions})\n"
+                f"⏸ <b>Лимит {_dir_side} позиций достигнут</b> ({n_pos}/{self.config.max_positions})\n"
                 f"<b>#{safe_symbol}</b> — сигнал пропущен", tg_msg_id
             )
             return None
