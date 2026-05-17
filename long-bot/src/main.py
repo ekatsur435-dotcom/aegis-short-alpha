@@ -888,7 +888,8 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             if verbose: print(f"{log_prefix} ⚠️ [MTF] error: {_mtf_e}")
 
         # ── Базовый scorer (backward compat) ─────────────────────────
-        hourly_deltas = await state.binance.get_hourly_volume_profile(symbol, 7)
+        # ✅ OPT: hourly_deltas уже загружены в get_complete_market_data → md.hourly_deltas
+        hourly_deltas = getattr(md, "hourly_deltas", None) or []
         price_trend   = state.pattern_detector._get_price_trend(ohlcv_15m)
         patterns      = state.pattern_detector.detect_all(ohlcv_15m, hourly_deltas, md)
 
@@ -1077,7 +1078,13 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     except Exception:
                         pass
                 if not _depth_cooldown:
-                    _ob_data = await state.auto_trader.bingx.get_order_book(symbol)
+                    try:
+                        # ✅ OPT: timeout 5s — BingX иногда висит 30s без ответа
+                        _ob_data = await asyncio.wait_for(
+                            state.auto_trader.bingx.get_order_book(symbol), timeout=5.0
+                        )
+                    except asyncio.TimeoutError:
+                        _ob_data = None
                     if _ob_data:
                         from core.orderbook_scorer import calculate_orderbook_score
                         _ob_score, _ob_desc, _ = calculate_orderbook_score(_ob_data, md.price, "long")
@@ -1113,35 +1120,33 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         except Exception as _ob_err:
             pass  # не критично
 
-        # ── P3: OnChain CoinGecko Volume Z-Score ─────────────────────────────
+        # ── P3+P35: OnChain CoinGecko — параллельный запрос (было sequential → +8s/symbol) ──
         _onchain_bonus = 0
         _onchain_desc = ""
-        try:
-            if os.getenv("ENABLE_ONCHAIN", "true").lower() == "true":
-                from core.onchain_client import get_volume_z_score, onchain_score_bonus
-                _redis_cli = state.redis.client if state.redis else None
-                _z, _zdesc = await asyncio.wait_for(
-                    get_volume_z_score(symbol, _redis_cli), timeout=8.0
-                )
-                _onchain_bonus, _onchain_desc = onchain_score_bonus(_z, "long")
-                if verbose and _zdesc:
-                    print(f"{log_prefix} {_zdesc}")
-        except Exception:
-            pass  # не критично
-
-        # ── #35: Active Addresses proxy (7-day volume delta) ─────────────────
         _addr_bonus = 0
         _addr_desc = ""
         try:
             if os.getenv("ENABLE_ONCHAIN", "true").lower() == "true":
-                from core.onchain_client import get_active_addr_proxy, addr_proxy_score_bonus
+                from core.onchain_client import (get_volume_z_score, onchain_score_bonus,
+                                                  get_active_addr_proxy, addr_proxy_score_bonus)
                 _redis_cli = state.redis.client if state.redis else None
-                _addr_pct, _addr_raw_desc = await asyncio.wait_for(
-                    get_active_addr_proxy(symbol, _redis_cli), timeout=8.0
+                # ✅ OPT: обе функции запускаем параллельно (раньше sequential: 2×8s → теперь max(8s))
+                _oc_results = await asyncio.gather(
+                    asyncio.wait_for(get_volume_z_score(symbol, _redis_cli), timeout=8.0),
+                    asyncio.wait_for(get_active_addr_proxy(symbol, _redis_cli), timeout=8.0),
+                    return_exceptions=True,
                 )
-                _addr_bonus, _addr_desc = addr_proxy_score_bonus(_addr_pct, "long")
-                if verbose and _addr_desc:
-                    print(f"{log_prefix} 📊 [ADDR] {_addr_desc}")
+                _oc_z, _oc_addr = _oc_results
+                if not isinstance(_oc_z, Exception):
+                    _z, _zdesc = _oc_z
+                    _onchain_bonus, _onchain_desc = onchain_score_bonus(_z, "long")
+                    if verbose and _zdesc:
+                        print(f"{log_prefix} {_zdesc}")
+                if not isinstance(_oc_addr, Exception):
+                    _addr_pct, _addr_raw_desc = _oc_addr
+                    _addr_bonus, _addr_desc = addr_proxy_score_bonus(_addr_pct, "long")
+                    if verbose and _addr_desc:
+                        print(f"{log_prefix} 📊 [ADDR] {_addr_desc}")
         except Exception:
             pass  # не критично
 
@@ -1698,7 +1703,8 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                         print(f"{log_prefix} ✅ [AEGIS] score={final_score:.1f} | components: {aegis_components}")
                 else:
                     if verbose:
-                        print(f"{log_prefix} ❌ [AEGIS] signal=None — Aegis engine отклонил")
+                        print(f"{log_prefix} ❌ [AEGIS] сигнал отклонён (pre_aegis_score={base_score:.1f})"
+                              f" — z_gate мог быть bypassed, но AEGIS internal score ниже порога")
                     return None
             except Exception as e:
                 if verbose:

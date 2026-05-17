@@ -48,6 +48,10 @@ _C6_SYSTEMIC_BTC_PCT   = float(os.getenv("Z_GATE_SYSTEMIC_BTC_PCT",      "5.0"))
 # Pre-pump detector: тихая консолидация + OI рост = bypass z_gate
 _PRE_PUMP_SOFT_SCORE   = int(float(os.getenv("PRE_PUMP_SOFT_SCORE",   "60")))     # score≥60 → z_gate × 0.6
 _PRE_PUMP_BYPASS_SCORE = int(float(os.getenv("PRE_PUMP_BYPASS_SCORE", "75")))     # score≥75 + OI → full bypass
+# Variant B: z_volume=0 (dump_detector ничего не нашёл) → score-weighted bypass
+# Случай: цена в аптренде (выше VWAP), нет dump exhaustion — но сигнал прошёл все остальные фильтры
+_Z_NODATA_BYPASS_MIN  = int(float(os.getenv("Z_NODATA_BYPASS_MIN",      "85")))  # base≥85 → полный bypass
+_Z_NODATA_SOFT_MIN    = int(float(os.getenv("Z_NODATA_SOFT_BYPASS_MIN", "75")))  # base≥75 → bypass −5pts
 
 
 class SignalStrengthLong(Enum):
@@ -582,6 +586,36 @@ class AegisLongSignalEngine:
                 elif _pp_score >= _PRE_PUMP_SOFT_SCORE:
                     # Умеренный паттерн — уже ослабили z_gate выше, повторная попытка не нужна
                     pass
+
+            # ── Variant B: z_volume≤1 + высокий base_score → score-weighted bypass ──
+            # dump_detector вернул 0-1 — не потому что сигнал плохой, а потому что:
+            #   • цена выше VWAP (uptrend — нет dump exhaustion по определению)
+            #   • low volume или velocity penalty → итог ≤1
+            # Сигнал уже прошёл: BASE_SCORER, REALTIME, MTF, PatternML, Consolidation,
+            # Trend, KillZone, SMC, SRCluster — если base_score≥75, dump_detector не должен блокировать.
+            if not _momentum_bypass and z_vol and z_vol.raw_score <= 1:
+                _z_raw_b = z_vol.raw_score
+                if base_score >= _Z_NODATA_BYPASS_MIN:
+                    _momentum_bypass = True
+                    all_reasons.append(
+                        f"🔓 Z_NODATA bypass: base={base_score:.0f}≥{_Z_NODATA_BYPASS_MIN} "
+                        f"(z_raw={_z_raw_b:.0f} — uptrend, нет dump exhaustion)"
+                    )
+                    logger.info(
+                        f"[Z_NODATA BYPASS LONG] {symbol}: z_raw={_z_raw_b:.0f}≤1 "
+                        f"base={base_score:.0f}≥{_Z_NODATA_BYPASS_MIN} → bypass z_gate"
+                    )
+                elif base_score >= _Z_NODATA_SOFT_MIN:
+                    _momentum_bypass = True
+                    final_score = max(final_score - 5, 0)
+                    all_reasons.append(
+                        f"🔓 Z_NODATA soft bypass: base={base_score:.0f}≥{_Z_NODATA_SOFT_MIN} "
+                        f"(z_raw={_z_raw_b:.0f}) — −5pts неопределённость"
+                    )
+                    logger.info(
+                        f"[Z_NODATA SOFT BYPASS LONG] {symbol}: z_raw={_z_raw_b:.0f}≤1 "
+                        f"base={base_score:.0f}≥{_Z_NODATA_SOFT_MIN} → soft bypass (−5pts)"
+                    )
 
             if not _momentum_bypass:
                 logger.info(
