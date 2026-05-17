@@ -1,13 +1,17 @@
 """
-Volume Profile v1.0 — POC-based SL (#31)
+Volume Profile v2.0 — POC SL (#31) + HVN/LVN Scorer (M2)
 
-Рассчитывает Volume Profile из OHLCV свечей и находит Point of Control (POC) —
-ценовой уровень с наибольшим торговым объёмом.
+POC-based SL: Point of Control как уровень Stop Loss.
+HVN/LVN Scorer: классификация High/Low Volume Nodes для score бонусов.
 
-POC = самый ликвидный уровень → сильное Support/Resistance → идеальный SL.
+HVN (High Volume Node): зоны высокой ликвидности → сильное S/R → замедление цены
+LVN (Low Volume Node):  зоны низкой ликвидности  → ценовой вакуум → ускорение цены
 
-SHORT: если POC выше текущей цены → SL чуть выше POC (зона сопротивления)
-LONG:  если POC ниже текущей цены  → SL чуть ниже POC (зона поддержки)
+Scoring (M2):
+  SHORT + HVN выше цены   → +10 (сопротивление с высоким объёмом)
+  SHORT + LVN ниже цены   → +6  (вакуум ниже, цена ускорится вниз)
+  LONG  + HVN ниже цены   → +10 (поддержка с высоким объёмом)
+  LONG  + LVN выше цены   → +6  (вакуум выше, цена ускорится вверх)
 
 ENV:
   USE_VP_SL          = true    включить Volume Profile SL
@@ -16,19 +20,26 @@ ENV:
   VP_BUFFER_PCT      = 0.2     буфер за POC (%)
   VP_SL_MIN_PCT      = 1.0     мин SL% от цены
   VP_SL_MAX_PCT      = 8.0     макс SL% от цены
+  VP_HVN_PROXIMITY   = 1.5     % близости к HVN/LVN для триггера бонуса
+  VP_HVN_THRESHOLD   = 0.5     σ выше среднего → HVN
+  VP_LVN_THRESHOLD   = 0.5     σ ниже среднего → LVN
 """
 import os
 import logging
-from typing import Optional, Tuple, List
+import statistics
+from typing import Optional, Tuple, List, NamedTuple
 
 logger = logging.getLogger(__name__)
 
-_ENABLE      = os.getenv("USE_VP_SL",    "true").lower() == "true"
-_LOOKBACK    = int(float(os.getenv("VP_LOOKBACK",  "60")))
-_BINS        = int(float(os.getenv("VP_BINS",      "50")))
-_BUFFER_PCT  = float(os.getenv("VP_BUFFER_PCT",    "0.2"))
-_SL_MIN_PCT  = float(os.getenv("VP_SL_MIN_PCT",    "1.0"))
-_SL_MAX_PCT  = float(os.getenv("VP_SL_MAX_PCT",    "8.0"))
+_ENABLE          = os.getenv("USE_VP_SL",        "true").lower() == "true"
+_LOOKBACK        = int(float(os.getenv("VP_LOOKBACK",      "60")))
+_BINS            = int(float(os.getenv("VP_BINS",          "50")))
+_BUFFER_PCT      = float(os.getenv("VP_BUFFER_PCT",        "0.2"))
+_SL_MIN_PCT      = float(os.getenv("VP_SL_MIN_PCT",        "1.0"))
+_SL_MAX_PCT      = float(os.getenv("VP_SL_MAX_PCT",        "8.0"))
+_HVN_PROXIMITY   = float(os.getenv("VP_HVN_PROXIMITY",     "1.5"))
+_HVN_THRESHOLD   = float(os.getenv("VP_HVN_THRESHOLD",     "0.5"))
+_LVN_THRESHOLD   = float(os.getenv("VP_LVN_THRESHOLD",     "0.5"))
 
 
 def _build_profile(candles, num_bins: int) -> List[Tuple[float, float]]:
@@ -179,3 +190,143 @@ def calculate_poc_sl(candles, price: float, direction: str) -> Tuple[Optional[fl
     except Exception as e:
         logger.debug(f"[VP SL] error: {e}")
         return None, f"[VP SL] error: {e}"
+
+
+class VpZone(NamedTuple):
+    price_low:  float
+    price_high: float
+    kind:       str    # "HVN" or "LVN"
+    volume:     float
+
+
+class VolumeProfileAnalyzer:
+    """
+    M2: Full Volume Profile — HVN/LVN classification + score bonus.
+
+    Использование:
+        vpa = VolumeProfileAnalyzer(candles, num_bins=50, lookback=60)
+        bonus, reason = vpa.score_bonus(price, direction="short")
+        base_score = max(0, min(100, base_score + bonus))
+    """
+
+    def __init__(self, candles, num_bins: int = _BINS, lookback: int = _LOOKBACK):
+        self._zones: List[VpZone] = []
+        self._poc:   Optional[float] = None
+        if not candles or len(candles) < 10:
+            return
+        try:
+            sample = candles[-lookback:] if len(candles) > lookback else candles
+            profile = _build_profile(sample, num_bins)
+            if not profile:
+                return
+
+            self._poc = max(profile, key=lambda x: x[1])[0]
+
+            volumes = [v for _, v in profile]
+            mean_v = statistics.mean(volumes)
+            std_v  = statistics.stdev(volumes) if len(volumes) > 1 else 0.0
+
+            hvn_thresh = mean_v + _HVN_THRESHOLD * std_v
+            lvn_thresh = mean_v - _LVN_THRESHOLD * std_v
+
+            bin_size = profile[1][0] - profile[0][0] if len(profile) > 1 else 0
+            half = bin_size / 2 if bin_size else 0
+
+            for price_mid, vol in profile:
+                if vol >= hvn_thresh:
+                    self._zones.append(VpZone(
+                        price_low=price_mid - half,
+                        price_high=price_mid + half,
+                        kind="HVN",
+                        volume=vol,
+                    ))
+                elif vol <= lvn_thresh and lvn_thresh > 0:
+                    self._zones.append(VpZone(
+                        price_low=price_mid - half,
+                        price_high=price_mid + half,
+                        kind="LVN",
+                        volume=vol,
+                    ))
+        except Exception as e:
+            logger.debug(f"[VPA] build error: {e}")
+
+    @property
+    def poc(self) -> Optional[float]:
+        return self._poc
+
+    def hvn_zones(self) -> List[VpZone]:
+        return [z for z in self._zones if z.kind == "HVN"]
+
+    def lvn_zones(self) -> List[VpZone]:
+        return [z for z in self._zones if z.kind == "LVN"]
+
+    def _near(self, zone: VpZone, price: float) -> bool:
+        """True если цена находится в пределах VP_HVN_PROXIMITY% от зоны."""
+        margin = price * _HVN_PROXIMITY / 100
+        return zone.price_low - margin <= price <= zone.price_high + margin
+
+    def score_bonus(self, price: float, direction: str) -> Tuple[int, str]:
+        """
+        Возвращает (bonus, reason) для SHORT или LONG позиции.
+
+        SHORT:
+          +10 если HVN ВЫШЕ цены (ближайшее сопротивление с большим объёмом)
+          +6  если LVN НИЖЕ цены (ценовой вакуум → ускорение вниз)
+        LONG:
+          +10 если HVN НИЖЕ цены (ближайшая поддержка с большим объёмом)
+          +6  если LVN ВЫШЕ цены (ценовой вакуум → ускорение вверх)
+        """
+        if not self._zones or price <= 0:
+            return 0, ""
+
+        bonus = 0
+        parts = []
+
+        try:
+            if direction == "short":
+                # HVN выше — сопротивление
+                hvn_above = [z for z in self.hvn_zones() if z.price_low > price]
+                if hvn_above:
+                    nearest = min(hvn_above, key=lambda z: z.price_low - price)
+                    dist_pct = (nearest.price_low - price) / price * 100
+                    if dist_pct <= _HVN_PROXIMITY * 2:
+                        bonus += 10
+                        parts.append(f"HVN↑@{nearest.price_low:.5g}(+{dist_pct:.1f}%)")
+
+                # LVN ниже — вакуум для падения
+                lvn_below = [z for z in self.lvn_zones() if z.price_high < price]
+                if lvn_below:
+                    nearest = min(lvn_below, key=lambda z: price - z.price_high)
+                    dist_pct = (price - nearest.price_high) / price * 100
+                    if dist_pct <= _HVN_PROXIMITY * 2:
+                        bonus += 6
+                        parts.append(f"LVN↓@{nearest.price_high:.5g}(-{dist_pct:.1f}%)")
+
+            else:  # long
+                # HVN ниже — поддержка
+                hvn_below = [z for z in self.hvn_zones() if z.price_high < price]
+                if hvn_below:
+                    nearest = min(hvn_below, key=lambda z: price - z.price_high)
+                    dist_pct = (price - nearest.price_high) / price * 100
+                    if dist_pct <= _HVN_PROXIMITY * 2:
+                        bonus += 10
+                        parts.append(f"HVN↓@{nearest.price_high:.5g}(-{dist_pct:.1f}%)")
+
+                # LVN выше — вакуум для роста
+                lvn_above = [z for z in self.lvn_zones() if z.price_low > price]
+                if lvn_above:
+                    nearest = min(lvn_above, key=lambda z: z.price_low - price)
+                    dist_pct = (nearest.price_low - price) / price * 100
+                    if dist_pct <= _HVN_PROXIMITY * 2:
+                        bonus += 6
+                        parts.append(f"LVN↑@{nearest.price_low:.5g}(+{dist_pct:.1f}%)")
+
+        except Exception as e:
+            logger.debug(f"[VPA] score_bonus error: {e}")
+            return 0, ""
+
+        if bonus == 0:
+            return 0, ""
+
+        reason = f"📊 [VP HVN/LVN] {' '.join(parts)} → +{bonus}"
+        return bonus, reason
