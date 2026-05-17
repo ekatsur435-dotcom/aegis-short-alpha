@@ -332,11 +332,11 @@ services:
         value: "1.3"
       # SystemicCrashGuard (A2)
       - key: SYSTEMIC_CRASH_BTC_PCT
-        value: "-5.0"           # BTC ≤ -5%/1h → системный краш
+        value: "-3.0"           # BTC ≤ -3%/1h → системный краш (было -5.0 — слишком мягко)
       - key: SYSTEMIC_CRASH_ALTS_RATIO
-        value: "0.80"           # 80%+ альтов с отрицательной 1h → краш
+        value: "0.65"           # 65%+ альтов с отрицательной 1h → краш (было 0.80)
       - key: SYSTEMIC_CRASH_COOLDOWN_MIN
-        value: "30"             # Блокировка LONG на 30 мин после краша
+        value: "45"             # Блокировка LONG на 45 мин после краша (было 30)
       # #19: KillZoneFilter
       - key: KILL_ZONE_BONUS
         value: "10"

@@ -336,20 +336,23 @@ def filter_mid_range(
             return True, "SPRING detected — ложный пробой вниз"
         if consolidation.has_breakout_up:
             return True, "BREAKOUT UP — пробой консолидации вверх ✅ Momentum"
-        if status == "near_support":
-            return True, "near support"
+        if status in ("lower_half", "near_support"):
+            # FIX: HTF медвежий → lower_half это зона ПРОДОЛЖЕНИЯ падения, не разворота.
+            # Блокируем LONG кроме экстремальной перепроданности (RSI < 20) или Spring.
+            if htf_bearish:
+                if rsi_1h < 20:
+                    return True, f"LONG в {status} РАЗРЕШЁН — HTF BEARISH но RSI={rsi_1h:.1f} ЭКСТРЕМАЛЬНО перепродан"
+                return False, f"LONG в {status} ЗАБЛОКИРОВАН — HTF BEARISH + RSI={rsi_1h:.1f} (зона слабости)"
+            return True, "lower half"
         if status in ("upper_half", "near_resistance"):
-            # ✅ v2.1: RSI 25→35 для LONG: разрешаем при перепроданности выше порога
-            # ✅ v2.1: near_resistance разрешаем при strong momentum (RSI > 60 + breakout-zone)
             if rsi_1h < 35:
                 return True, f"LONG в {status} РАЗРЕШЁН — RSI 1H={rsi_1h:.1f} перепродан"
             if status == "near_resistance" and rsi_1h > 60:
                 return True, f"LONG в {status} РАЗРЕШЁН — Momentum RSI 1H={rsi_1h:.1f}"
-            # ✅ FIX #5: HTF бычий → LONG в верхней половине = продолжение тренда (порог RSI < 40)
             if htf_bullish and rsi_1h < 40:
                 return True, f"LONG в {status} РАЗРЕШЁН — HTF BULLISH + RSI 1H={rsi_1h:.1f}"
             return False, f"LONG в {status} — плохая зона для входа"
-        return True, "lower half"
+        return True, "ok"
 
     # Для SHORT — только верхняя половина или Upthrust
     if direction == "short":
