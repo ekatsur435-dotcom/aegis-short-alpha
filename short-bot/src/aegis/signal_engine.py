@@ -580,26 +580,3 @@ class AegisSignalEngine:
             timestamp=datetime.utcnow().isoformat(),
         )
 
-    def format_signal_report(self, signal: AegisSignal) -> str:
-        grade_emoji    = {"A+": "💎", "A": "🥇", "B": "🥈", "C": "🥉", "D": "⚠️"}
-        strength_emoji = {
-            SignalStrength.ULTRA:    "🔥 ULTRA",
-            SignalStrength.STRONG:   "🔴 STRONG",
-            SignalStrength.MODERATE: "🟠 MODERATE",
-            SignalStrength.WATCH:    "🟡 WATCH",
-        }
-        order  = ["z_volume", "oi_change", "funding_rate", "smc_structure", "delta_flow", "rsi_aux"]
-        labels = {"z_volume": "#1+2 Z+Vol  ", "oi_change": "#3  OI      ",
-                  "funding_rate": "#4  Funding ", "smc_structure": "#5  SMC     ",
-                  "delta_flow": "    Delta   ", "rsi_aux": "#6  RSI aux "}
-        lines = ""
-        for k in order:
-            cs = signal.components.get(k)
-            if cs:
-                bar = "█" * int(cs.raw_score / 10) + "░" * (10 - int(cs.raw_score // 10))
-                lines += f"  {labels.get(k, k)}: {bar} {cs.raw_score:.0f}\n"
-        return (
-            f"{grade_emoji.get(signal.grade,'⚠️')} <b>Aegis SHORT {signal.grade}</b> | "
-            f"{strength_emoji.get(signal.strength,'📊')} | Score: {signal.total_score:.1f}%\n"
-            f"{lines}"
-        )

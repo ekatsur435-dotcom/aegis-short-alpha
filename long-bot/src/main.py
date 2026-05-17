@@ -2096,6 +2096,15 @@ async def scan_market():
                         if trade_result:
                             active_count += 1
                             exchange_full = active_count >= Config.MAX_POSITIONS
+                            # signals_db: mark signal as executed
+                            if state.signals_db:
+                                try:
+                                    _sid = state._signal_db_map.get(symbol)
+                                    _ep = float(trade_result.get("entry_price", 0)) if isinstance(trade_result, dict) else 0.0
+                                    if _sid and _ep:
+                                        state.signals_db.mark_executed(_sid, _ep)
+                                except Exception:
+                                    pass
                             # TradeManager: запись открытой позиции для TP-статистики
                             if state.trade_manager:
                                 try:
@@ -2432,6 +2441,13 @@ async def _daily_report_task():
                 else:
                     await state.telegram._send_daily_report() if hasattr(state.telegram, "_send_daily_report") else None
                 print("✅ Daily report sent (Redis-based)")
+                # PerformanceTracker: Sharpe / PF / MaxDD (in-RAM stats)
+                if state.performance_tracker:
+                    try:
+                        pt_msg = state.performance_tracker.daily_report()
+                        await state.telegram.send_message(pt_msg)
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"Daily report error: {e}")
 
