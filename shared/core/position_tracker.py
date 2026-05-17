@@ -342,17 +342,27 @@ class PositionTracker:
                         print(f"[VT] update taken_tps error: {e}")
 
                     remaining = total - len(taken)
-                    be_line = f"\n{be_msg}" if be_msg else ""
                     await self._notify(signal, (
                         f"🎯 <b>[ВИРТУАЛ] {tp_label}/{total} взят!</b>\n\n"
                         f"{d_emoji} <b>#{symbol}</b>  {direction.upper()}\n"
                         f"📍 Вход:        <b>${entry:,.6f}</b>\n"
                         f"🎯 {tp_label}:  <b>${tp_price:,.6f}</b>  ({tp_weight:.0f}% позиции)\n"
                         f"📊 P&L:         <b>+{pnl_pct:.2f}%</b>\n"
-                        f"⏳ Осталось TP: {remaining}"
-                        + be_line +
-                        f"\n<i>📋 Виртуал — не открыта на бирже</i>"
+                        f"⏳ Осталось TP: {remaining}\n"
+                        f"<i>📋 Виртуал — не открыта на бирже</i>"
                     ))
+
+                    # ✅ FIX: Отдельное сообщение о BE (раньше было в конце TP-сообщения — незаметно)
+                    if new_sl_virtual and be_msg:
+                        sl_pnl_vt = _pnl(direction, entry, new_sl_virtual)
+                        await self._notify(signal, (
+                            f"🔒 <b>[ВИРТУАЛ] {be_msg}</b>\n\n"
+                            f"{d_emoji} <b>#{symbol}</b>  {direction.upper()}\n"
+                            f"📍 Вход:      <b>${entry:,.6f}</b>\n"
+                            f"🛑 Было SL:   <b>${old_sl:,.6f}</b>\n"
+                            f"✅ Теперь SL: <b>${new_sl_virtual:,.6f}</b>  ({sl_pnl_vt:+.2f}%)\n"
+                            f"<i>Позиция защищена — стоп передвинут</i>"
+                        ))
                 break
 
     async def _cleanup_zombie_positions(self, signals: list):

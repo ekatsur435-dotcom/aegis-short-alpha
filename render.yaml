@@ -55,6 +55,8 @@ services:
         value: "10"           # BUG-2 FIX: было хардкод 15, выравниваем с LONG=8
       - key: SCAN_INTERVAL
         value: "180"          # П8: было 180 → 120s
+      - key: SCAN_CONCURRENCY
+        value: "20"           # Параллельность сканирования (default=12 → 20, +67% throughput)
       - key: MAX_SHORT_POSITIONS
         value: "15"           # Лимит SHORT позиций (независимо от LONG-бота)
       - key: SHORT_SL_BUFFER
@@ -243,6 +245,8 @@ services:
         value: "65"           # AEGIS engine внутренний порог
       - key: SCAN_INTERVAL
         value: "180"          # Long чуть медленнее short
+      - key: SCAN_CONCURRENCY
+        value: "20"           # Параллельность сканирования (default=12 → 20, +67% throughput)
       - key: MAX_LONG_POSITIONS
         value: "15"           # Лимит LONG позиций (независимо от SHORT-бота)
       - key: LONG_SL_BUFFER
@@ -268,7 +272,7 @@ services:
       - key: MIN_VOLUME_USDT
         value: "200000"       # П15: long — чуть выше порог для качества
       - key: ACCOUNT_CAPITAL_USD
-        value: "1000"          # Капитал счёта в USD (для расчёта размера позиции)
+        value: "20000"          # Капитал счёта в USD (для расчёта размера позиции)
       - key: MAX_CONSECUTIVE_LOSSES
         value: "3"             # Стоп торговли после N подряд убытков
       - key: MAX_EXPOSURE_PCT
@@ -277,6 +281,12 @@ services:
         value: "true"          # Использовать ATR для расчёта SL
       - key: Z_VOLUME_GATE_MIN
         value: "10"             # Порог z_volume gate для LONG (default=8, adaptive→3 при системных условиях)
+      - key: Z_NODATA_BYPASS_MIN
+        value: "85"             # Variant B: base≥85 + dump_detector=0 → полный bypass z_gate (uptrend сигнал)
+      - key: Z_NODATA_SOFT_BYPASS_MIN
+        value: "75"             # Variant B: base≥75 + dump_detector=0 → soft bypass (−5pts к итоговому score)
+      - key: ONCHAIN_FALLBACK_TTL
+        value: "10800"          # Variant D: TTL fallback кэша OnChain (3ч — при сбое CoinGecko API)
       - key: ENABLE_MOMENTUM_LONG
         value: "true"          # Bypass z_volume gate для momentum LONG
       - key: Z_GATE_NEAR_MISS_Z_MIN

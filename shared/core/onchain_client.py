@@ -30,6 +30,7 @@ _ENABLE_ONCHAIN   = os.getenv("ENABLE_ONCHAIN", "true").lower() == "true"
 _CG_BASE_URL      = "https://api.coingecko.com/api/v3"
 _CG_API_KEY       = os.getenv("COINGECKO_API_KEY", "")            # demo key → x-cg-demo-api-key header
 _REDIS_TTL        = int(os.getenv("ONCHAIN_REDIS_TTL", "3600"))   # 1 час
+_FALLBACK_TTL     = int(os.getenv("ONCHAIN_FALLBACK_TTL", "10800"))  # 3ч — последнее известное z при сбое API
 _Z_INFLOW_HIGH    = float(os.getenv("ONCHAIN_Z_INFLOW", "2.0"))   # z > этого = аномальный приток
 _Z_OUTFLOW_LOW    = float(os.getenv("ONCHAIN_Z_OUTFLOW", "-1.5")) # z < этого = аномальный отток
 _ADDR_ANOMALY_PCT = float(os.getenv("ONCHAIN_ADDR_ANOMALY_PCT", "20.0"))  # % для #35
@@ -252,6 +253,41 @@ def _calc_z_score(values: list) -> float:
         return 0.0
 
 
+def _z_fallback_key(symbol: str) -> str:
+    return f"onchain:vol_z_fallback:{symbol}"
+
+
+def _save_fallback_z(redis_client, symbol: str, z: float, desc: str) -> None:
+    """Сохраняем последнее успешное z_score как fallback (TTL=3ч)."""
+    if not redis_client or z == 0.0:
+        return
+    try:
+        redis_client.setex(
+            _z_fallback_key(symbol),
+            _FALLBACK_TTL,
+            json.dumps({"z": z, "desc": desc}),
+        )
+    except Exception:
+        pass
+
+
+def _read_fallback_z(redis_client, symbol: str) -> Optional[Tuple[float, str]]:
+    """Читаем последнее известное z_score при сбое API (до 3ч стабильности)."""
+    if not redis_client:
+        return None
+    try:
+        cached = redis_client.get(_z_fallback_key(symbol))
+        if cached:
+            data = json.loads(cached)
+            z, desc = data["z"], data["desc"]
+            # Помечаем как устаревшее, чтобы было видно в логах
+            stale_desc = desc if "[↩кэш]" in desc else f"{desc} [↩кэш]"
+            return z, stale_desc
+    except Exception:
+        pass
+    return None
+
+
 async def get_volume_z_score(
     symbol: str,
     redis_client=None,
@@ -300,6 +336,7 @@ async def get_volume_z_score(
                     redis_client.setex(cache_key, _REDIS_TTL, json.dumps({"z": z, "desc": desc}))
                 except Exception:
                     pass
+            _save_fallback_z(redis_client, symbol, z, desc)
             return z, desc
         # CryptoCompare fallback (3-й) — даёт настоящий z-score из 14-дневной истории
         cc_vols = await _get_cc_volumes(base)
@@ -317,7 +354,12 @@ async def get_volume_z_score(
                     redis_client.setex(cache_key, _REDIS_TTL, json.dumps({"z": z, "desc": desc}))
                 except Exception:
                     pass
+            _save_fallback_z(redis_client, symbol, z, desc)
             return z, desc
+        _fb = _read_fallback_z(redis_client, symbol)
+        if _fb:
+            logger.info(f"[OnChain] {symbol}: нет маппинга → fallback z={_fb[0]:.1f}")
+            return _fb
         return 0.0, f"[OnChain] {symbol}: нет маппинга CoinGecko/CMC/CC"
 
     # Запрашиваем CoinGecko
@@ -331,11 +373,19 @@ async def get_volume_z_score(
         async with aiohttp.ClientSession(timeout=timeout, headers=_cg_headers()) as sess:
             async with sess.get(url, params=params) as resp:
                 if resp.status != 200:
+                    _fb = _read_fallback_z(redis_client, symbol)
+                    if _fb:
+                        logger.info(f"[OnChain] {symbol}: HTTP {resp.status} → fallback z={_fb[0]:.1f}")
+                        return _fb
                     return 0.0, f"[OnChain] HTTP {resp.status}"
                 raw = await resp.json()
 
         volumes = raw.get("total_volumes", [])
         if not volumes or len(volumes) < 5:
+            _fb = _read_fallback_z(redis_client, symbol)
+            if _fb:
+                logger.info(f"[OnChain] {symbol}: мало данных → fallback z={_fb[0]:.1f}")
+                return _fb
             return 0.0, "[OnChain] Мало данных"
 
         vol_values = [v[1] for v in volumes]
@@ -348,20 +398,28 @@ async def get_volume_z_score(
         else:
             desc = f"OnChain: z={z:.1f} нейтрально"
 
-        # Кешируем в Redis
+        # Кешируем в Redis + сохраняем fallback для восстановления при сбоях
         if redis_client:
             try:
                 redis_client.setex(cache_key, _REDIS_TTL, json.dumps({"z": z, "desc": desc}))
             except Exception:
                 pass
+        _save_fallback_z(redis_client, symbol, z, desc)
 
         logger.info(f"[OnChain] {symbol}: z={z:.2f} | {desc}")
         return z, desc
 
     except asyncio.TimeoutError:
+        _fb = _read_fallback_z(redis_client, symbol)
+        if _fb:
+            logger.info(f"[OnChain] {symbol}: timeout → fallback z={_fb[0]:.1f}")
+            return _fb
         return 0.0, "[OnChain] Timeout"
     except Exception as e:
         logger.debug(f"[OnChain] {symbol}: {e}")
+        _fb = _read_fallback_z(redis_client, symbol)
+        if _fb:
+            return _fb
         return 0.0, ""
 
 
