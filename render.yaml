@@ -48,9 +48,9 @@ services:
       - key: MIN_SHORT_SCORE
         value: "65"          # AEGIS final threshold
       - key: MIN_SHORT_BASE_SCORE
-        value: "50"          # BASE_SCORER порог (мягче — AEGIS потом доуточняет)
+        value: "55"          # BASE_SCORER порог (мягче — AEGIS потом доуточняет)
       - key: AEGIS_SHORT_MIN_SCORE
-        value: "60"          # AEGIS engine внутренний порог (аналог AEGIS_LONG_MIN_SCORE=65)
+        value: "65"          # AEGIS engine внутренний порог (аналог AEGIS_LONG_MIN_SCORE=65)
       - key: Z_VOLUME_GATE_MIN_SHORT
         value: "10"           # BUG-2 FIX: было хардкод 15, выравниваем с LONG=8
       - key: SCAN_INTERVAL
@@ -70,9 +70,9 @@ services:
       - key: ATR_SL_MAX_PCT
         value: "4.0"           # Макс ATR SL от входа
       - key: MIN_VOLUME_USDT
-        value: "150000"       # П15: было 300000 → 150000
+        value: "200000"       # П15: было 300000 → 150000
       - key: ACCOUNT_CAPITAL_USD
-        value: "1000"          # Капитал счёта в USD (для расчёта размера позиции)
+        value: "20000"          # Капитал счёта в USD (для расчёта размера позиции)
       - key: MAX_CONSECUTIVE_LOSSES
         value: "3"             # Стоп торговли после N подряд убытков
       - key: Z_GATE_NEAR_MISS_Z_MIN
@@ -130,7 +130,7 @@ services:
       - key: ENABLE_MOMENTUM_SHORT
         value: "true"
       - key: MOMENTUM_RSI_MAX_SHORT
-        value: "48"
+        value: "50"
       - key: MOMENTUM_VOL_MIN_SHORT
         value: "1.3"
       - key: MOMENTUM_DOWNTREND_1H
@@ -191,6 +191,8 @@ services:
         value: "60"              # score ≥ X → z_gate × 0.6
       - key: PRE_PUMP_BYPASS_SCORE
         value: "75"              # score ≥ X + OI → полный bypass
+      - key: PRE_PUMP_PRICE_POSITION
+        value: "0.40"            # SHORT: цена должна быть в верхних 40% диапазона (ratio > 0.60)
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
@@ -232,11 +234,11 @@ services:
       - key: MAX_PAIRS
         value: "200"
       - key: MAX_WATCHLIST
-        value: "1000"
+        value: "2000"
       - key: MIN_LONG_SCORE
         value: "72"           # AEGIS final threshold
       - key: MIN_LONG_BASE_SCORE
-        value: "60"           # BASE_SCORER порог
+        value: "65"           # BASE_SCORER порог
       - key: AEGIS_LONG_MIN_SCORE
         value: "65"           # AEGIS engine внутренний порог
       - key: SCAN_INTERVAL
@@ -377,6 +379,8 @@ services:
         value: "60"
       - key: PRE_PUMP_BYPASS_SCORE
         value: "75"
+      - key: PRE_PUMP_PRICE_POSITION
+        value: "0.40"            # LONG: цена должна быть в нижних 40% диапазона (ratio < 0.40)
       # Signals DB
       - key: SIGNALS_DB_PATH
         value: "/opt/render/project/signals_long.db"
