@@ -1274,11 +1274,11 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         _cons_filter_on = os.getenv("CONSOLIDATION_FILTER_ENABLED", "true").lower() == "true"
         if _cons_filter_on and state.consolidation_detector and ohlcv_15m:
             cons = state.consolidation_detector.detect(ohlcv_15m, price)
-            # ✅ FIX #4: передаём RSI 1H для исключения при экстремальной перепроданности
             rsi_1h_val = getattr(md, "rsi_1h", 50.0) or 50.0
-            # ✅ FIX #5: HTF bullish → LONG в upper_half = продолжение тренда, порог RSI снижен до 40
             _htf_is_bullish = "bull" in _htf_str.lower() or "bullish" in _htf_str.lower()
-            allow, reason = filter_mid_range(cons, price, "long", verbose=False, rsi_1h=rsi_1h_val, htf_bullish=_htf_is_bullish)
+            _htf_is_bearish = "bear" in _htf_str.lower() or "bearish" in _htf_str.lower()
+            allow, reason = filter_mid_range(cons, price, "long", verbose=False, rsi_1h=rsi_1h_val,
+                                             htf_bullish=_htf_is_bullish, htf_bearish=_htf_is_bearish)
 
             if cons.is_consolidating and not allow:
                 # ✅ FIX P4: CONSOLIDATION softening — сильный сигнал + breakout override
@@ -1530,12 +1530,13 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         except Exception as _cf_e:
             logger.debug(f"[Confluence] long: {_cf_e}")
 
-        # M1: S/R кластеризация — K-Median по swing highs/lows
+        # M1 + M5/M7: S/R кластеризация (общий инстанс для M1, M5, M7)
+        _src_shared = None
         if ohlcv_4h and len(ohlcv_4h) >= 15:
             try:
                 from core.sr_cluster import SRCluster
-                _src = SRCluster(ohlcv_4h)
-                _src_bonus, _src_reason = _src.score_bonus(price, "long")
+                _src_shared = SRCluster(ohlcv_4h)
+                _src_bonus, _src_reason = _src_shared.score_bonus(price, "long")
                 if _src_bonus > 0:
                     base_score = max(0, min(100, base_score + _src_bonus))
                     if verbose:
@@ -1556,26 +1557,21 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             except Exception as _htf_e:
                 logger.debug(f"[HTFLevels] long: {_htf_e}")
 
-        # M5/M7: False Breakout + Absorption (общий SRCluster)
+        # M5/M7: False Breakout + Absorption (переиспользуем _src_shared из M1)
         if ohlcv_15m and len(ohlcv_15m) >= 3:
             try:
-                from core.sr_cluster import SRCluster as _SRC57
-                _src57 = _SRC57(ohlcv_4h) if ohlcv_4h and len(ohlcv_4h) >= 15 else None
-
-                # M5: False Breakout Filter
                 from core.false_breakout_detector import detect_false_breakout_from_sr
                 _fb_bonus, _fb_reason = detect_false_breakout_from_sr(
-                    ohlcv_15m, price, "long", sr_cluster=_src57
+                    ohlcv_15m, price, "long", sr_cluster=_src_shared
                 )
                 if _fb_bonus > 0:
                     base_score = max(0, min(100, base_score + _fb_bonus))
                     if verbose:
                         print(f"{log_prefix} {_fb_reason}")
 
-                # M7: Absorption паттерны
                 from core.absorption_detector import detect_absorption_from_sr
                 _ab_bonus, _ab_reason = detect_absorption_from_sr(
-                    ohlcv_15m, price, "long", sr_cluster=_src57
+                    ohlcv_15m, price, "long", sr_cluster=_src_shared
                 )
                 if _ab_bonus > 0:
                     base_score = max(0, min(100, base_score + _ab_bonus))

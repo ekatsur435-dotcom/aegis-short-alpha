@@ -25,12 +25,37 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
 
-# Настройка логирования — только если хендлеры ещё не добавлены (иначе дубли)
+# Настройка логирования — однократная конфигурация с dedup-фильтром
+import time as _time
+
+class _DedupLogFilter(logging.Filter):
+    """Подавляет одинаковые log-строки в пределах 5-секундного окна."""
+    def __init__(self, capacity: int = 300):
+        super().__init__()
+        self._seen: dict = {}
+        self._cap = capacity
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        key = f"{record.levelno}:{record.name}:{record.getMessage()[:120]}"
+        now = _time.monotonic()
+        last = self._seen.get(key, 0.0)
+        if now - last < 5.0:
+            return False
+        self._seen[key] = now
+        if len(self._seen) > self._cap:
+            oldest = sorted(self._seen, key=self._seen.get)[:60]
+            for k in oldest:
+                del self._seen[k]
+        return True
+
 if not logging.root.handlers:
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+_dedup_filter = _DedupLogFilter()
+logging.getLogger("aegis.signal_engine").addFilter(_dedup_filter)
+logging.getLogger("aegis").addFilter(_dedup_filter)
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -1455,12 +1480,13 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         except Exception as _cf_e:
             logger.debug(f"[Confluence] short: {_cf_e}")
 
-        # M1: S/R кластеризация — K-Median по swing highs/lows
+        # M1 + M5/M7: S/R кластеризация (общий инстанс для M1, M5, M7)
+        _src_shared = None
         if ohlcv_4h and len(ohlcv_4h) >= 15:
             try:
                 from core.sr_cluster import SRCluster
-                _src = SRCluster(ohlcv_4h)
-                _src_bonus, _src_reason = _src.score_bonus(price, "short")
+                _src_shared = SRCluster(ohlcv_4h)
+                _src_bonus, _src_reason = _src_shared.score_bonus(price, "short")
                 if _src_bonus > 0:
                     base_score = max(0, min(100, base_score + _src_bonus))
                     if verbose:
@@ -1481,26 +1507,21 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             except Exception as _htf_e:
                 logger.debug(f"[HTFLevels] short: {_htf_e}")
 
-        # M5/M7: False Breakout + Absorption (общий SRCluster)
+        # M5/M7: False Breakout + Absorption (переиспользуем _src_shared из M1)
         if ohlcv_15m and len(ohlcv_15m) >= 3:
             try:
-                from core.sr_cluster import SRCluster as _SRC57
-                _src57 = _SRC57(ohlcv_4h) if ohlcv_4h and len(ohlcv_4h) >= 15 else None
-
-                # M5: False Breakout Filter
                 from core.false_breakout_detector import detect_false_breakout_from_sr
                 _fb_bonus, _fb_reason = detect_false_breakout_from_sr(
-                    ohlcv_15m, price, "short", sr_cluster=_src57
+                    ohlcv_15m, price, "short", sr_cluster=_src_shared
                 )
                 if _fb_bonus > 0:
                     base_score = max(0, min(100, base_score + _fb_bonus))
                     if verbose:
                         print(f"{log_prefix} {_fb_reason}")
 
-                # M7: Absorption паттерны
                 from core.absorption_detector import detect_absorption_from_sr
                 _ab_bonus, _ab_reason = detect_absorption_from_sr(
-                    ohlcv_15m, price, "short", sr_cluster=_src57
+                    ohlcv_15m, price, "short", sr_cluster=_src_shared
                 )
                 if _ab_bonus > 0:
                     base_score = max(0, min(100, base_score + _ab_bonus))
