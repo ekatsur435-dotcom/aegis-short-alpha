@@ -53,8 +53,8 @@ services:
         value: "10"           # BUG-2 FIX: было хардкод 15, выравниваем с LONG=8
       - key: SCAN_INTERVAL
         value: "180"          # П8: было 180 → 120s
-      - key: MAX_POSITIONS
-        value: "30"
+      - key: MAX_SHORT_POSITIONS
+        value: "15"           # Лимит SHORT позиций (независимо от LONG-бота)
       - key: SHORT_SL_BUFFER
         value: "2.5"
       - key: SHORT_LEVERAGE
@@ -224,8 +224,8 @@ services:
         value: "65"           # AEGIS engine внутренний порог
       - key: SCAN_INTERVAL
         value: "180"          # Long чуть медленнее short
-      - key: MAX_POSITIONS
-        value: "30"
+      - key: MAX_LONG_POSITIONS
+        value: "15"           # Лимит LONG позиций (независимо от SHORT-бота)
       - key: LONG_SL_BUFFER
         value: "3.0"
       - key: SWING_SL_MIN_PCT

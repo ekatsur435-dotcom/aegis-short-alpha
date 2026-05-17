@@ -134,7 +134,7 @@ class Config:
     # Paid tier
     MAX_PAIRS     = int(os.getenv("MAX_PAIRS", "150"))
     SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "240"))    # Long = медленнее
-    MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "12"))
+    MAX_POSITIONS = int(os.getenv("MAX_LONG_POSITIONS", os.getenv("MAX_POSITIONS", "12")))
 
     MIN_SCORE     = int(os.getenv("MIN_LONG_SCORE", "72"))   # FIX: default выровнен с render.yaml (было 52 — расхождение 20 пунктов)
     SL_BUFFER     = float(os.getenv("LONG_SL_BUFFER", "2.5"))  # ✅ FIX v17: 3.0→2.5% (TP1 теперь выше)
