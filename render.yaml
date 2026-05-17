@@ -178,6 +178,19 @@ services:
         value: "/opt/render/project/signals_short.db"
       - key: SL_COOLDOWN_HOURS
         value: "1.0"             # Блок повторного входа на символ после стопа (часов)
+      # Pre-pump detector (SHORT: тихая вершина + OI + перегретый funding → bypass z_gate)
+      - key: ENABLE_PRE_PUMP_DETECTOR
+        value: "true"
+      - key: PRE_PUMP_ATR_SQUEEZE
+        value: "0.65"            # ATR(14)/SMA(ATR,20) < X → сжатие
+      - key: PRE_PUMP_RANGE_PCT
+        value: "3.5"             # Диапазон 20 баров / close < X%
+      - key: PRE_PUMP_OI_MIN_PCT
+        value: "2.0"             # oi_change_4h ≥ X% для подтверждения
+      - key: PRE_PUMP_SOFT_SCORE
+        value: "60"              # score ≥ X → z_gate × 0.6
+      - key: PRE_PUMP_BYPASS_SCORE
+        value: "75"              # score ≥ X + OI → полный bypass
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
@@ -351,6 +364,19 @@ services:
         value: "0"               # 0 = авто (= SCAN_INTERVAL)
       - key: EXTENDED_TP_LONG
         value: "false"           # true = 6 TP уровней для long-bot (false = стандартные 4)
+      # Pre-pump detector (LONG: тихое накопление + OI↑ + funding нейтральный → bypass z_gate)
+      - key: ENABLE_PRE_PUMP_DETECTOR
+        value: "true"
+      - key: PRE_PUMP_ATR_SQUEEZE
+        value: "0.65"
+      - key: PRE_PUMP_RANGE_PCT
+        value: "3.5"
+      - key: PRE_PUMP_OI_MIN_PCT
+        value: "2.0"
+      - key: PRE_PUMP_SOFT_SCORE
+        value: "60"
+      - key: PRE_PUMP_BYPASS_SCORE
+        value: "75"
       # Signals DB
       - key: SIGNALS_DB_PATH
         value: "/opt/render/project/signals_long.db"
