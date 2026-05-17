@@ -370,36 +370,6 @@ class TradeManager:
         
         self._save_stats()
     
-    def get_win_rate_by_tp(self) -> Dict:
-        """Получить win rate по TP уровням"""
-        total = self.stats["total_trades"]
-        if total == 0:
-            return {}
-        
-        return {
-            "tp1_rate": (self.stats.get("tp1_hits", 0) / total * 100),
-            "tp2_rate": (self.stats.get("tp2_hits", 0) / total * 100),
-            "tp3_rate": (self.stats.get("tp3_hits", 0) / total * 100),
-            "tp4_rate": (self.stats.get("tp4_hits", 0) / total * 100),
-            "sl_rate": (self.stats.get("sl_hits", 0) / total * 100),
-            "overall_win_rate": self.stats.get("win_rate", 0)
-        }
-    
-    def get_open_positions(self) -> List[TradePosition]:
-        """Получить открытые позиции"""
-        return [p for p in self.positions.values() 
-                if p.status in [PositionStatus.OPEN, PositionStatus.TP1_HIT, 
-                              PositionStatus.TP2_HIT, PositionStatus.TP3_HIT]]
-    
-    def get_statistics(self) -> Dict:
-        """Получить полную статистику"""
-        return {
-            **self.stats,
-            "by_tp": self.get_win_rate_by_tp(),
-            "open_positions": len(self.get_open_positions()),
-            "avg_pnl_per_trade": (self.stats["total_pnl"] / self.stats["total_trades"] 
-                                  if self.stats["total_trades"] > 0 else 0)
-        }
 
 
 # Singleton

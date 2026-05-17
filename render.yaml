@@ -33,6 +33,8 @@ services:
         sync: false
       - key: SHORT_TELEGRAM_CHAT_ID
         sync: false
+      - key: SHORT_TELEGRAM_TOPIC_ID
+        sync: false  # Telegram топик для short-bot (опционально)
       - key: RENDER_EXTERNAL_URL
         fromService:
           name: aegis-short-alpha
@@ -206,6 +208,8 @@ services:
         sync: false
       - key: LONG_TELEGRAM_CHAT_ID
         sync: false
+      - key: LONG_TELEGRAM_TOPIC_ID
+        sync: false  # Telegram топик для long-bot (опционально)
       - key: RENDER_EXTERNAL_URL
         fromService:
           name: aegis-long-alpha
@@ -345,6 +349,8 @@ services:
       # A5: OHLCV кеш
       - key: OHLCV_CACHE_TTL
         value: "0"               # 0 = авто (= SCAN_INTERVAL)
+      - key: EXTENDED_TP_LONG
+        value: "false"           # true = 6 TP уровней для long-bot (false = стандартные 4)
       # Signals DB
       - key: SIGNALS_DB_PATH
         value: "/opt/render/project/signals_long.db"
