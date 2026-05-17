@@ -390,6 +390,11 @@ class AutoTrader:
                 )
             )
 
+        # ── 10.5. LOG-1: Проверяем что SL выставлен на бирже ────────────────
+        asyncio.create_task(
+            self._ensure_sl(bingx_symbol, position_side, stop_loss, direction, order.size, tg_msg_id)
+        )
+
         # ── 11. Save ──────────────────────────────────────────────────────────
         position_data = {
             "symbol":       symbol,
@@ -497,6 +502,54 @@ class AutoTrader:
 
         status = "✅" if success > 0 else "⚠️"
         print(f"{status} TP orders {bingx_symbol}: {success} placed, {fails} failed")
+
+    async def _ensure_sl(self, bingx_symbol: str, position_side: str,
+                          stop_loss: float, direction: str,
+                          qty: float, tg_msg_id: Optional[int]):
+        """LOG-1: После открытия позиции проверяем что SL выставлен на бирже.
+        3 попытки: 5s → 15s → 30s. При неудаче — критический алерт в Telegram."""
+        delays = [5, 15, 30]
+        for attempt, delay in enumerate(delays, 1):
+            await asyncio.sleep(delay)
+            try:
+                orders_result = await self.bingx._make_request(
+                    "GET", "/openApi/swap/v2/trade/openOrders",
+                    params={"symbol": bingx_symbol}
+                )
+                open_orders = []
+                if orders_result and orders_result.get("code") == 0:
+                    open_orders = orders_result.get("data", {}).get("orders", [])
+
+                sl_exists = any(
+                    o.get("type") in ("STOP_MARKET", "STOP")
+                    and o.get("positionSide") == position_side
+                    for o in open_orders
+                )
+
+                if sl_exists:
+                    print(f"✅ [SL_CHECK] {bingx_symbol}/{position_side}: SL подтверждён (попытка {attempt})")
+                    return
+
+                print(f"⚠️ [SL_CHECK] {bingx_symbol}/{position_side}: SL не найден (попытка {attempt}), выставляем...")
+                ok = await self.bingx.update_stop_loss(bingx_symbol, position_side, stop_loss, direction)
+                if ok:
+                    print(f"✅ [SL_CHECK] {bingx_symbol}/{position_side}: SL выставлен (попытка {attempt})")
+                    return
+
+                code = getattr(self.bingx, 'last_error_code', None)
+                print(f"⚠️ [SL_CHECK] {bingx_symbol}/{position_side}: SL отклонён (попытка {attempt}), code={code}")
+
+            except Exception as e:
+                print(f"⚠️ [SL_CHECK] {bingx_symbol}/{position_side}: Exception (попытка {attempt}): {e}")
+
+        safe_sym = _escape_value(bingx_symbol)
+        await self._tg_reply(
+            f"🚨 <b>КРИТИЧНО: SL не выставлен!</b>\n"
+            f"<code>{safe_sym}</code> {position_side} qty={qty}\n"
+            f"SL={stop_loss} — все {len(delays)} попытки провалились\n"
+            f"⚠️ Проверьте и выставьте SL вручную!",
+            tg_msg_id
+        )
 
     async def close_position(self, symbol: str, position_side: str) -> bool:
         bingx_symbol = self._to_bingx_symbol(symbol)
