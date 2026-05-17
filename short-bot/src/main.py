@@ -1422,6 +1422,94 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             except Exception as _div_e:
                 logger.debug(f"[DeltaDiv] short: {_div_e}")
 
+        # M2: Volume Profile HVN/LVN scorer
+        _vpa_poc = None
+        if ohlcv_4h and len(ohlcv_4h) >= 20:
+            try:
+                from core.volume_profile import VolumeProfileAnalyzer
+                _vpa = VolumeProfileAnalyzer(ohlcv_4h)
+                _vpa_poc = _vpa.poc
+                _vp_bonus, _vp_reason = _vpa.score_bonus(price, "short")
+                if _vp_bonus > 0:
+                    base_score = max(0, min(100, base_score + _vp_bonus))
+                    if verbose:
+                        print(f"{log_prefix} {_vp_reason}")
+            except Exception as _vpa_e:
+                logger.debug(f"[VPA] short: {_vpa_e}")
+
+        # M4: Confluence Scoring — cross-TF S/R подтверждение
+        try:
+            from core.confluence_scorer import build_confluence_scorer
+            _cs = build_confluence_scorer(
+                price=price,
+                ohlcv_15m=ohlcv_15m,
+                ohlcv_1h=ohlcv_30m,   # 30m как средний ТФ
+                ohlcv_4h=ohlcv_4h,
+                poc_4h=_vpa_poc,
+            )
+            _cf_bonus, _cf_reason = _cs.score_bonus(price, "short")
+            if _cf_bonus > 0:
+                base_score = max(0, min(100, base_score + _cf_bonus))
+                if verbose:
+                    print(f"{log_prefix} {_cf_reason}")
+        except Exception as _cf_e:
+            logger.debug(f"[Confluence] short: {_cf_e}")
+
+        # M1: S/R кластеризация — K-Median по swing highs/lows
+        if ohlcv_4h and len(ohlcv_4h) >= 15:
+            try:
+                from core.sr_cluster import SRCluster
+                _src = SRCluster(ohlcv_4h)
+                _src_bonus, _src_reason = _src.score_bonus(price, "short")
+                if _src_bonus > 0:
+                    base_score = max(0, min(100, base_score + _src_bonus))
+                    if verbose:
+                        print(f"{log_prefix} {_src_reason}")
+            except Exception as _src_e:
+                logger.debug(f"[SRCluster] short: {_src_e}")
+
+        # M3: Weekly/Monthly HTF level scorer
+        _ms_htf = getattr(md, "market_structure", None)
+        if _ms_htf and getattr(_ms_htf, "has_1d", False):
+            try:
+                from core.htf_level_scorer import htf_level_score_bonus
+                _htf_bonus, _htf_reason = htf_level_score_bonus(price, "short", _ms_htf)
+                if _htf_bonus > 0:
+                    base_score = max(0, min(100, base_score + _htf_bonus))
+                    if verbose:
+                        print(f"{log_prefix} {_htf_reason}")
+            except Exception as _htf_e:
+                logger.debug(f"[HTFLevels] short: {_htf_e}")
+
+        # M5/M7: False Breakout + Absorption (общий SRCluster)
+        if ohlcv_15m and len(ohlcv_15m) >= 3:
+            try:
+                from core.sr_cluster import SRCluster as _SRC57
+                _src57 = _SRC57(ohlcv_4h) if ohlcv_4h and len(ohlcv_4h) >= 15 else None
+
+                # M5: False Breakout Filter
+                from core.false_breakout_detector import detect_false_breakout_from_sr
+                _fb_bonus, _fb_reason = detect_false_breakout_from_sr(
+                    ohlcv_15m, price, "short", sr_cluster=_src57
+                )
+                if _fb_bonus > 0:
+                    base_score = max(0, min(100, base_score + _fb_bonus))
+                    if verbose:
+                        print(f"{log_prefix} {_fb_reason}")
+
+                # M7: Absorption паттерны
+                from core.absorption_detector import detect_absorption_from_sr
+                _ab_bonus, _ab_reason = detect_absorption_from_sr(
+                    ohlcv_15m, price, "short", sr_cluster=_src57
+                )
+                if _ab_bonus > 0:
+                    base_score = max(0, min(100, base_score + _ab_bonus))
+                    if verbose:
+                        print(f"{log_prefix} {_ab_reason}")
+
+            except Exception as _m57_e:
+                logger.debug(f"[M5/M7] short: {_m57_e}")
+
         # Dynamic TP
         btc_trend = ("down" if (cached_btc_1h or 0) < -0.5 else
                      "up"   if (cached_btc_1h or 0) > 0.5 else "sideways")
