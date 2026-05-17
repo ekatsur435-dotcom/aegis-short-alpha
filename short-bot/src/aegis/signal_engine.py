@@ -36,7 +36,7 @@ _OVERBOUGHT_RSI_MIN_SHORT = float(os.getenv("OVERBOUGHT_RSI_MIN_SHORT", "63"))  
 # Bearish Continuation bypass — для плавных даунтрендов без volume spike (CETUS/AGI тип)
 _ENABLE_BEARISH_CONT_SHORT  = os.getenv("ENABLE_BEARISH_CONT_SHORT", "true").lower() == "true"
 _BEARISH_CONT_RSI_MIN       = float(os.getenv("BEARISH_CONT_RSI_MIN_SHORT", "30"))   # RSI выше этого (не на дне)
-_BEARISH_CONT_RSI_MAX       = float(os.getenv("BEARISH_CONT_RSI_MAX_SHORT", "60"))   # RSI ниже этого (RANGING даёт RSI~55)
+_BEARISH_CONT_RSI_MAX       = float(os.getenv("BEARISH_CONT_RSI_MAX_SHORT", "68"))   # RSI ниже этого (68 = начало даунтренда с перекупленного пика)
 # Extreme Funding + Multi-Pattern bypass (AGIUSDT тип)
 _ENABLE_EXTREME_FUNDING_BYPASS  = os.getenv("ENABLE_EXTREME_FUNDING_BYPASS", "true").lower() == "true"
 _EXTREME_FUNDING_THRESHOLD      = float(os.getenv("EXTREME_FUNDING_BYPASS_THRESHOLD", "0.05"))  # funding ≥ 0.05%
@@ -477,10 +477,10 @@ class AegisSignalEngine:
                 # RANGING = нейтральный HTF, тоже допускает bearish cont (цена может идти в любую сторону)
                 _htf_is_bear_bc = "bear" in _htf_bc.lower() or "ranging" in _htf_bc.lower()
                 # Fix #2: если htf_structure пустая (BingX offline) но цена явно падает — treat as ranging
-                if not _htf_is_bear_bc and not _htf_bc and _p4h_bc < -3.0:
+                if not _htf_is_bear_bc and not _htf_bc and _p4h_bc < -2.0:
                     _htf_is_bear_bc = True
                 if (_BEARISH_CONT_RSI_MIN <= _rsi_bc <= _BEARISH_CONT_RSI_MAX
-                        and (_p4h_bc < -3.0 or _p24h_bc < -8.0)
+                        and (_p4h_bc < -2.0 or _p24h_bc < -8.0)
                         and _htf_is_bear_bc
                         and base_score >= _BEARISH_CONT_BASE_MIN):
                     _momentum_bypass = True

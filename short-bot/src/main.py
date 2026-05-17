@@ -25,11 +25,12 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
 
-# Настройка логирования — INFO уровень для видимости fallback логов
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Настройка логирования — только если хендлеры ещё не добавлены (иначе дубли)
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -1393,6 +1394,12 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 base_score = max(0, min(100, base_score + _trend_result.score_bonus))
                 if verbose:
                     print(f"{log_prefix} {_trend_result.description}")
+                # 3/4 контртренд без перегрева RSI — шорт против роста не оправдан
+                if (_trend_result.is_penalty and _trend_result.counter >= 3
+                        and (md.rsi_1h or 50) < 70):
+                    if verbose:
+                        print(f"{log_prefix} 🚫 [COUNTER-TREND BLOCK] 3/4 против + RSI={(md.rsi_1h or 50):.0f} < 70 — блок")
+                    return None
         except Exception as _tr_e:
             logger.debug(f"[TrendDetector] short: {_tr_e}")
             pass
