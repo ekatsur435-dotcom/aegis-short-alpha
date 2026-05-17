@@ -112,6 +112,7 @@ from aegis.signal_engine import AegisSignalEngine, SignalStrength
 from aegis.smart_dca import SmartDCAEngine, GridConfig, GridType
 from aegis.risk_manager import AegisRiskManager, RiskLimits
 from aegis.performance_tracker import PerformanceTracker, TradeRecord
+from aegis.systemic_pump_guard import SystemicPumpGuard
 from detectors.pump_detector import PumpDetector, ZScoreConfig
 from detectors.oi_analyzer import OIAnalyzer, FundingConfig
 from detectors.liquidation_mapper import LiquidationMapper
@@ -239,6 +240,7 @@ class BotState:
         self.dca_engine:          Optional[SmartDCAEngine]        = None
         self.risk_manager:        Optional[AegisRiskManager]      = None
         self.performance_tracker: Optional[PerformanceTracker]    = None
+        self.pump_guard:          SystemicPumpGuard               = SystemicPumpGuard()
 
         # Detectors
         self.pump_detector:   Optional[PumpDetector]       = None
@@ -853,6 +855,8 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         # ✅ OPT: hourly_deltas уже загружены в get_complete_market_data → md.hourly_deltas
         hourly_deltas = getattr(md, "hourly_deltas", None) or []
         price_trend   = state.pattern_detector._get_price_trend(ohlcv_15m)
+        state.pump_guard.update_symbol(price_trend or "flat")
+        md.price_trend = price_trend or "flat"   # нужен realtime_scorer Fix C
         patterns      = state.pattern_detector.detect_all(ohlcv_15m, hourly_deltas, md)
 
         # 🆕 Паттерны на 30M — уже загружены, просто запускаем detect_all
@@ -1076,8 +1080,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         _oi_4h   = getattr(md, 'oi_change_4h', 0.0) or 0.0
         # HTF structure и zone из market_structure
         _ms_s    = getattr(md, 'market_structure', None)
-        _htf_str = getattr(_ms_s, 'htf_structure', '') or ''
-        _zone    = getattr(_ms_s, 'zone_4h', '') or ''
+        _htf_str              = getattr(_ms_s, 'htf_structure', '') or ''
+        _htf_is_bullish_short = "bull" in _htf_str.lower()
+        _zone                 = getattr(_ms_s, 'zone_4h', '') or ''
         # 30M delta — вычисляем из уже загруженных 30m свечей (без доп. API вызова)
         _delta_30m = []
         if ohlcv_30m:
@@ -1195,10 +1200,15 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             try:
                 from utils.market_structure import proximity_bonus
                 _ms_bonus, _ms_reasons = proximity_bonus(price, _ms, "short")
+                # B: при HTF=BULLISH урезаем положительный MS-бонус вдвое — шорт контртрендовый
+                _ms_htf_cut = _htf_is_bullish_short and _ms_bonus > 0
+                if _ms_htf_cut:
+                    _ms_bonus = int(_ms_bonus * 0.5)
                 if _ms_bonus != 0:
                     base_score = max(0, min(100, base_score + _ms_bonus))
                     if verbose and _ms_reasons:
-                        print(f"{log_prefix} 🏗 [MS] {' | '.join(_ms_reasons[:3])}")
+                        _ms_lbl = "[MS×0.5 HTF=BULLISH]" if _ms_htf_cut else "[MS]"
+                        print(f"{log_prefix} 🏗 {_ms_lbl} {' | '.join(_ms_reasons[:3])}")
             except Exception as _ms_e:
                 pass  # MS bonus не критичен
 
@@ -1430,15 +1440,22 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 base_score = max(0, min(100, base_score + _trend_result.score_bonus))
                 if verbose:
                     print(f"{log_prefix} {_trend_result.description}")
-                # 3/4 контртренд без перегрева RSI — шорт против роста не оправдан
-                if (_trend_result.is_penalty and _trend_result.counter >= 3
+                # A: при HTF=BULLISH порог снижен с 3/4 до 2/4 — рост ещё не остановлен
+                _ct_threshold = 2 if _htf_is_bullish_short else 3
+                if (_trend_result.is_penalty and _trend_result.counter >= _ct_threshold
                         and (md.rsi_1h or 50) < 70):
                     if verbose:
-                        print(f"{log_prefix} 🚫 [COUNTER-TREND BLOCK] 3/4 против + RSI={(md.rsi_1h or 50):.0f} < 70 — блок")
+                        print(f"{log_prefix} 🚫 [COUNTER-TREND BLOCK] {_ct_threshold}/4 против + RSI={(md.rsi_1h or 50):.0f} < 70 — блок")
                     return None
         except Exception as _tr_e:
             logger.debug(f"[TrendDetector] short: {_tr_e}")
             pass
+
+        # D: SystemicPumpGuard — BTC +3%/1h + >50% альтов pump → блок SHORT на HTF=BULLISH
+        if state.pump_guard.is_pump() and _htf_is_bullish_short:
+            if verbose:
+                print(f"{log_prefix} 🚫 [SYSTEMIC_PUMP] {state.pump_guard.reason} — SHORT на HTF=BULLISH заблокирован")
+            return None
 
         # #19: KillZoneFilter — бонус/штраф по времени сессии
         _kz_delta, _kz_reason = KillZoneFilter.get_adjustment()
@@ -1888,6 +1905,10 @@ async def scan_market():
         "low_score": 0,
     }
 
+    # D: SystemicPumpGuard — сбрасываем счётчики перед сканом, передаём BTC
+    state.pump_guard.reset_cycle()
+    state.pump_guard.update_btc(_btc_cache_1h or 0.0)
+
     # ✅ FIX БАГ 5: Параллельный pre-fetch — сокращает скан с ~5 мин до ~30с
     # SCAN_CONCURRENCY=8 означает 8 символов одновременно (по умолчанию)
     _SCAN_SEM = asyncio.Semaphore(int(os.getenv("SCAN_CONCURRENCY", "12")))  # ✅ FIX v17: 8→12
@@ -1910,6 +1931,10 @@ async def scan_market():
     _prefetch_results = await asyncio.gather(*_prefetch_tasks)
     _dt = (datetime.utcnow() - _t0).total_seconds()
     print(f"⚡ Parallel fetch: {len(state.watchlist)} symbols in {_dt:.1f}s")
+    # D: SystemicPumpGuard — вычисляем pump-режим после сбора статистики по альтам
+    state.pump_guard.evaluate()
+    if state.pump_guard.is_pump():
+        print(f"🆙 [SYSTEMIC_PUMP] {state.pump_guard.reason} — SHORT на HTF=BULLISH заблокирован")
     _prefetch_map = dict(_prefetch_results)
 
     for symbol in state.watchlist:
