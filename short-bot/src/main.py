@@ -392,12 +392,14 @@ async def lifespan(app: FastAPI):
     state.liq_detector   = None  # LiquidationZoneDetector требует Coinglass
 
     # ── Aegis Signal Engine ──
+    from core.pre_pump_detector import get_pre_pump_detector
     state.signal_engine = AegisSignalEngine(
         pump_detector=state.pump_detector,
         oi_analyzer=state.oi_analyzer,
         liq_mapper=state.liq_mapper,
         delta_analyzer=state.delta_analyzer,
-        min_score=Config.AEGIS_MIN_SCORE,  # ✅ FIX: теперь читает AEGIS_SHORT_MIN_SCORE (было MIN_SHORT_SCORE=55)
+        pre_pump_detector=get_pre_pump_detector(),
+        min_score=Config.AEGIS_MIN_SCORE,
     ) if Config.ENABLE_AEGIS_ENGINE else None
 
     # ── Smart DCA ──

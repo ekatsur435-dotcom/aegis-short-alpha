@@ -425,6 +425,7 @@ async def lifespan(app: FastAPI):
         print("⚠️ NetflowAnalyzerLong отключён (COINGLASS_API_KEY не задан)")
     state.liq_detector = None  # LiquidationZoneDetector требует отдельного восстановления
 
+    from core.pre_pump_detector import get_pre_pump_detector
     state.signal_engine = AegisLongSignalEngine(
         dump_detector=state.dump_detector,
         oi_analyzer=state.oi_analyzer,
@@ -433,6 +434,7 @@ async def lifespan(app: FastAPI):
         delta_analyzer=state.delta_analyzer,
         liq_mapper=state.liq_mapper,
         netflow_analyzer=state.netflow_analyzer,
+        pre_pump_detector=get_pre_pump_detector(),
         min_score=Config.AEGIS_MIN_SCORE,
     ) if Config.ENABLE_AEGIS_ENGINE else None
 

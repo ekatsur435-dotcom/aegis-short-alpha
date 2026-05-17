@@ -49,6 +49,9 @@ _FUNDING_EXTREME_SHORT      = float(os.getenv("FUNDING_EXTREME_SHORT", "0.05")) 
 _C6_NEAR_MISS_Z        = float(os.getenv("Z_GATE_NEAR_MISS_Z_MIN",       "6.0"))  # z≥6 + base≥65 → bypass
 _C6_HIGH_SCORE_MIN     = float(os.getenv("Z_GATE_HIGH_SCORE_BYPASS_MIN", "80"))   # base≥80 + z≥2 → bypass
 _C6_SYSTEMIC_BTC_PCT   = float(os.getenv("Z_GATE_SYSTEMIC_BTC_PCT",      "5.0"))  # BTC -X%/h → systemic crash (SHORT)
+# Pre-pump detector: тихая консолидация + OI рост = bypass z_gate
+_PRE_PUMP_SOFT_SCORE   = int(float(os.getenv("PRE_PUMP_SOFT_SCORE",   "60")))     # score≥60 → z_gate × 0.6
+_PRE_PUMP_BYPASS_SCORE = int(float(os.getenv("PRE_PUMP_BYPASS_SCORE", "75")))     # score≥75 + OI → full bypass
 
 
 class SignalStrength(Enum):
@@ -122,14 +125,16 @@ class AegisSignalEngine:
         liq_mapper=None,
         smc_detector=None,
         delta_analyzer=None,
+        pre_pump_detector=None,
         min_score: float = 54.0,
     ):
-        self.pump_detector  = pump_detector
-        self.oi_analyzer    = oi_analyzer
-        self.liq_mapper     = liq_mapper
-        self.smc_detector   = smc_detector
-        self.delta_analyzer = delta_analyzer
-        self.min_score      = min_score
+        self.pump_detector     = pump_detector
+        self.oi_analyzer       = oi_analyzer
+        self.liq_mapper        = liq_mapper
+        self.smc_detector      = smc_detector
+        self.delta_analyzer    = delta_analyzer
+        self.pre_pump_detector = pre_pump_detector
+        self.min_score         = min_score
 
     def _score_to_strength(self, score: float) -> SignalStrength:
         for strength, threshold in sorted(
@@ -405,6 +410,27 @@ class AegisSignalEngine:
                 f"(OI={_oi_c.raw_score:.0f} Fund={_fund_c.raw_score:.0f})"
             )
 
+        # Pre-pump (pre-dump для SHORT): тихая консолидация на вершине + OI + перегретый funding
+        _pre_pump = None
+        if self.pre_pump_detector and ohlcv_15m:
+            try:
+                _pre_pump = self.pre_pump_detector.detect(ohlcv_15m, market_data, "short")
+            except Exception:
+                pass
+
+        # Wyckoff Upthrust бонус к pre-pump score (Вариант A: +15 если паттерн подтверждает SHORT)
+        if _pre_pump and _pre_pump.get("detected"):
+            _pats_wy = getattr(market_data, "patterns", []) or []
+            _DIST_PATTERNS = {"WYCKOFF_UPTHRUST", "TRAP_LONG"}
+            if any(any(d in p for d in _DIST_PATTERNS) for p in _pats_wy):
+                _pp_new = min(_pre_pump["score"] + 15, 100)
+                _pre_pump["score"] = _pp_new
+                _pre_pump["reasons"].append("Wyckoff Upthrust паттерн подтверждает SHORT: +15pts")
+                if _pp_new >= _PRE_PUMP_BYPASS_SCORE and _pre_pump["oi_confirmed"]:
+                    _pre_pump["z_gate_action"] = "bypass"
+                elif _pp_new >= _PRE_PUMP_SOFT_SCORE:
+                    _pre_pump["z_gate_action"] = "soften"
+
         # HARD GATE: z_volume — главный индикатор SHORT (памп/перекупленность).
         z_vol = components.get("z_volume")
         # ── BUG-3 FIX: Adaptive z_gate — при системных условиях снижаем порог до 3 ──
@@ -420,6 +446,18 @@ class AegisSignalEngine:
                 f"[Z_GATE_ADAPTIVE] {symbol}: BTC={btc_change_1h:+.1f}% fund={_funding_now:.4f}% "
                 f"→ z_gate adaptive 3 (normal={_Z_VOLUME_GATE_MIN})"
             )
+        # Pre-pump: ослабляем z_gate при умеренном паттерне (Вариант C)
+        if _pre_pump and _pre_pump.get("detected"):
+            _pp_score = _pre_pump.get("score", 0)
+            _pp_action = _pre_pump.get("z_gate_action", "none")
+            if _pp_action == "soften" and _z_effective > 1:
+                _z_effective = max(_z_effective * 0.6, 1.0)
+                logger.info(
+                    f"[PRE-PUMP SHORT] {symbol}: score={_pp_score} → z_gate softened to {_z_effective:.1f}"
+                )
+            elif _pp_action == "bypass":
+                _z_effective = 0
+
         _z_gate_failed = z_vol and z_vol.raw_score < _z_effective
         if _z_gate_failed:
             _momentum_bypass = False
@@ -531,6 +569,22 @@ class AegisSignalEngine:
                     _momentum_bypass = True
                     all_reasons.append(f"C6 SYSTEMIC CRASH bypass: BTC 1H={btc_change_1h:+.1f}% z={_z_raw:.1f}")
                     logger.info(f"[AEGIS C6 SYSTEMIC] {symbol}: BTC {btc_change_1h:+.1f}% crash → systemic dump → bypass")
+
+            # Pre-pump bypass: сильная консолидация + OI подтверждён + перегретый funding
+            if not _momentum_bypass and _pre_pump and _pre_pump.get("detected"):
+                _pp_score = _pre_pump.get("score", 0)
+                _pp_oi    = _pre_pump.get("oi_confirmed", False)
+                if _pp_score >= _PRE_PUMP_BYPASS_SCORE and _pp_oi:
+                    _momentum_bypass = True
+                    all_reasons.append(
+                        f"PRE-PUMP SHORT bypass: консолидация score={_pp_score} + OI↑ "
+                        f"({'; '.join(_pre_pump.get('reasons', [])[:2])})"
+                    )
+                    final_score = min(final_score + 8, 100)
+                    logger.info(
+                        f"[PRE-PUMP BYPASS SHORT] {symbol}: score={_pp_score} oi_ok={_pp_oi} "
+                        f"z={z_vol.raw_score:.0f} < {_z_effective} → bypass"
+                    )
 
             if not _momentum_bypass:
                 logger.info(
