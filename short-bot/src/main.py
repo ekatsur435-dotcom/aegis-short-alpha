@@ -887,6 +887,24 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             elif rsi_4h:
                 if rsi_4h > 70:   _mtf_bonus = 8
                 elif rsi_4h > 65: _mtf_bonus = 4
+
+            # ── RSI Divergence: 4H vs 1H (слабеющий импульс) ────────────
+            # 4H RSI выше 1H RSI = 4H ещё горячий, но 1H уже охлаждается
+            # Это классический сигнал momentum exhaustion перед разворотом
+            if rsi_4h and rsi_1h:
+                _rsi_div = rsi_4h - rsi_1h
+                if _rsi_div >= 12 and rsi_4h >= 60:
+                    # 4H перегрет, 1H откатывает → импульс слабеет → хорошо для SHORT
+                    _mtf_bonus += 6
+                    if verbose: print(f"{log_prefix} 📉 [MTF RSI DIV] 4H={rsi_4h:.0f} > 1H={rsi_1h:.0f} (∆={_rsi_div:.0f}) — импульс слабеет → +6")
+                elif _rsi_div >= 8 and rsi_4h >= 55:
+                    _mtf_bonus += 3
+                    if verbose: print(f"{log_prefix} 📉 [MTF RSI DIV] 4H={rsi_4h:.0f} > 1H={rsi_1h:.0f} (∆={_rsi_div:.0f}) → +3")
+                elif _rsi_div <= -15 and rsi_1h >= 65:
+                    # 1H спайкует >> 4H = локальный памп без поддержки старшего ТФ → плохо для SHORT
+                    _mtf_bonus -= 5
+                    if verbose: print(f"{log_prefix} ⚠️ [MTF RSI DIV] 1H={rsi_1h:.0f} >> 4H={rsi_4h:.0f} — локальный памп → -5")
+
         except Exception as _mtf_e:
             if verbose: print(f"{log_prefix} ⚠️ [MTF] error: {_mtf_e}")
         # ────────────────────────────────────────────────────────────────
