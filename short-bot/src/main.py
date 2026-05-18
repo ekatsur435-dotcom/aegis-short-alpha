@@ -123,6 +123,7 @@ from detectors.liquidation_mapper import LiquidationMapper
 from detectors.delta_analyzer import DeltaAnalyzer
 # Coinglass API отключён: постоянные HTTP 500 → liq_detector=None
 from core.kill_zone_filter import KillZoneFilter  # #19
+from core.btc_momentum_guard import BTCMomentumGuard
 
 
 # ============================================================================
@@ -245,6 +246,7 @@ class BotState:
         self.risk_manager:        Optional[AegisRiskManager]      = None
         self.performance_tracker: Optional[PerformanceTracker]    = None
         self.pump_guard:          SystemicPumpGuard               = SystemicPumpGuard()
+        self.btc_momentum_guard:  BTCMomentumGuard                = BTCMomentumGuard()
 
         # Detectors
         self.pump_detector:   Optional[PumpDetector]       = None
@@ -821,36 +823,69 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             rsi_30m = _calc_rsi(ohlcv_30m) if ohlcv_30m else None
             rsi_4h  = _calc_rsi(ohlcv_4h)  if ohlcv_4h  else None
             rsi_1h  = md.rsi_1h or 50
-            _p1h = getattr(md, "price_change_1h", 0) or 0
-            _p4h = getattr(md, "price_change_4h", 0) or 0
-            # Пороги читаются из ENV (были хардкод -3.0 / -8.0)
+            _p1h  = getattr(md, "price_change_1h",  0) or 0
+            _p4h  = getattr(md, "price_change_4h",  0) or 0
+            _p24h = getattr(md, "price_change_24h", 0) or 0
             _momentum_1h_thr = float(os.getenv("MOMENTUM_DOWNTREND_1H", "-1.5"))
             _momentum_4h_thr = float(os.getenv("MOMENTUM_DOWNTREND_4H", "-8.0"))
             _is_downtrend = _p1h < _momentum_1h_thr or _p4h < _momentum_4h_thr
 
-            # Шорт: все таймфреймы перегреты → сильный сигнал
-            if rsi_4h and rsi_30m:
+            # ── REAL Multi-TF: price momentum alignment across 4H / 1H / 30M ───
+            # Считаем сколько TF подтверждают SHORT направление
+            _mtf_bearish_count = 0
+            _mtf_bullish_count = 0
+
+            # TF confirmations (price direction)
+            if _p4h  < -1.0:  _mtf_bearish_count += 1
+            elif _p4h  > 1.0: _mtf_bullish_count += 1
+            if _p1h  < -0.5:  _mtf_bearish_count += 1
+            elif _p1h  > 0.5: _mtf_bullish_count += 1
+            if _p24h < -3.0:  _mtf_bearish_count += 1
+            elif _p24h > 3.0: _mtf_bullish_count += 1
+
+            # RSI alignment (4H + 1H + 30M)
+            _rsi_bearish = sum([
+                1 if (rsi_4h  or 50) > 68 else 0,
+                1 if rsi_1h  > 63 else 0,
+                1 if (rsi_30m or 50) > 63 else 0,
+            ])
+            _rsi_bullish = sum([
+                1 if (rsi_4h  or 50) < 35 else 0,
+                1 if rsi_1h  < 38 else 0,
+                1 if (rsi_30m or 50) < 38 else 0,
+            ])
+
+            # Compute MTF bonus
+            if _mtf_bearish_count >= 3 and _rsi_bearish >= 2:
+                _mtf_bonus = 18
+                if verbose: print(f"{log_prefix} 📉 [MTF] {_mtf_bearish_count}/3 TF bearish + RSI перегрет {_rsi_bearish}/3 → +18")
+            elif _mtf_bearish_count >= 2 and _rsi_bearish >= 2:
+                _mtf_bonus = 12
+                if verbose: print(f"{log_prefix} 📉 [MTF] {_mtf_bearish_count}/3 TF bearish + RSI {_rsi_bearish}/3 → +12")
+            elif _mtf_bearish_count >= 3:
+                _mtf_bonus = 8
+                if verbose: print(f"{log_prefix} 📉 [MTF] Все 3 TF bearish (RSI нейтрально) → +8")
+            elif _mtf_bullish_count >= 2 and _rsi_bullish >= 1:
+                # Bullish TF + перепроданность = ПРОТИВ SHORT
+                _mtf_bonus = -12
+                if verbose: print(f"{log_prefix} ⚠️ [MTF] {_mtf_bullish_count}/3 TF bullish + RSI перепродан {_rsi_bullish}/3 → -12")
+            elif _mtf_bullish_count >= 2:
+                _mtf_bonus = -6
+                if verbose: print(f"{log_prefix} ⚠️ [MTF] {_mtf_bullish_count}/3 TF bullish → -6")
+            elif rsi_4h and rsi_30m:
+                # Legacy: RSI-only check
                 if rsi_4h > 70 and rsi_1h > 65 and rsi_30m > 65:
-                    _mtf_bonus = 15
-                    if verbose: print(f"{log_prefix} 📈 [MTF] RSI 4H={rsi_4h} 1H={rsi_1h:.0f} 30M={rsi_30m} — всё перегрето +15")
+                    _mtf_bonus = 12
                 elif rsi_4h > 65 and rsi_1h > 60:
-                    _mtf_bonus = 8
-                    if verbose: print(f"{log_prefix} 📈 [MTF] RSI 4H={rsi_4h} 1H={rsi_1h:.0f} — перегрев +8")
+                    _mtf_bonus = 6
                 elif rsi_4h < 40 and rsi_1h < 45 and _is_downtrend:
-                    # MOMENTUM SHORT: RSI низкий, цена падает → trend continuation SHORT
-                    _mtf_bonus = 5
-                    if verbose: print(f"{log_prefix} 📉 [MTF] RSI {rsi_1h:.0f} низкий но DOWNTREND {_p1h:.1f}%/1H — SHORT продолжение +5")
+                    _mtf_bonus = 4
                 elif rsi_4h < 30 and rsi_1h < 45:
-                    # RSI 4H < 30 = экстремальная перепроданность — штрафуем только тут
-                    # RSI 30-40 = нижняя зона даунтренда, штрафовать нельзя (пропускаем сигналы)
                     _htf_for_mtf = getattr(getattr(md, 'market_structure', None), 'htf_structure', '') or ''
                     if "bear" not in _htf_for_mtf.lower():
-                        _mtf_bonus = -5  # Перепродан без ценового подтверждения — лёгкий штраф
-                        if verbose: print(f"{log_prefix} ⚠️ [MTF] RSI 4H={rsi_4h} перепродан без тренда {_mtf_bonus}")
-                    else:
-                        if verbose: print(f"{log_prefix} ℹ️ [MTF] RSI 4H={rsi_4h} низкий но HTF=BEARISH — штраф отменён")
+                        _mtf_bonus = -5
             elif rsi_4h:
-                if rsi_4h > 70: _mtf_bonus = 8
+                if rsi_4h > 70:   _mtf_bonus = 8
                 elif rsi_4h > 65: _mtf_bonus = 4
         except Exception as _mtf_e:
             if verbose: print(f"{log_prefix} ⚠️ [MTF] error: {_mtf_e}")
@@ -1377,10 +1412,34 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 )
             return None
 
+        # ── Anti-Chasing Filter — вход на дне после дампа ("поезд ушёл") ──────
+        # Если цена уже выросла X% от локального минимума за последние N свечей 15m
+        # → бот шортит не на вершине, а в середине отскока → HIGH RISK
+        _anti_chase_enabled = os.getenv("ENABLE_ANTI_CHASING", "true").lower() == "true"
+        if _anti_chase_enabled and ohlcv_15m and len(ohlcv_15m) >= 4:
+            try:
+                _ac_candles    = int(os.getenv("ANTI_CHASE_CANDLES",   "4"))   # последние N свечей
+                _ac_threshold  = float(os.getenv("ANTI_CHASE_PCT",     "2.5")) # % роста от low
+                _ac_window = ohlcv_15m[-_ac_candles:]
+                _ac_low    = min(c.low  for c in _ac_window)
+                _ac_cur    = ohlcv_15m[-1].close
+                if _ac_low > 0:
+                    _ac_bounce_pct = (_ac_cur - _ac_low) / _ac_low * 100
+                    if _ac_bounce_pct >= _ac_threshold:
+                        if verbose:
+                            print(
+                                f"{log_prefix} 🚫 [ANTI-CHASING] цена выросла "
+                                f"+{_ac_bounce_pct:.1f}% от low за {_ac_candles}×15m — "
+                                f"вход в SHORT на отскоке запрещён"
+                            )
+                        return None
+            except Exception:
+                pass
+
         # FIX #3 — POST-DUMP BLOCK: актив уже упал → шортим дно, а не вершину
         # Сценарий A: 4H падение > порог + RSI < 45 (дамп ещё не переварен)
         # Сценарий B: шортим отскок — 1H растёт при 24H < -8% (DYM-паттерн)
-        _short_drop_block_pct = float(os.getenv("SHORT_BLOCK_AFTER_DROP_PCT", "7.0"))
+        _short_drop_block_pct = float(os.getenv("SHORT_BLOCK_AFTER_DROP_PCT", "4.0"))  # FIX: 7.0→4.0
         _short_drop_bypass_score = float(os.getenv("SHORT_DROP_BYPASS_MIN_SCORE", "85"))
         _p4h_now  = getattr(md, "price_change_4h", 0) or 0
         _p1h_now  = getattr(md, "price_change_1h",  0) or 0
@@ -1585,11 +1644,11 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 if verbose:
                     print(f"{log_prefix} {_trend_result.description}")
                 # A: при HTF=BULLISH порог снижен с 3/4 до 2/4 — рост ещё не остановлен
+                # FIX: убран RSI gate (< 70) — RSI 70-80 в uptrend = ловушка, блок обязателен
                 _ct_threshold = 2 if _htf_is_bullish_short else 3
-                if (_trend_result.is_penalty and _trend_result.counter >= _ct_threshold
-                        and (md.rsi_1h or 50) < 70):
+                if _trend_result.is_penalty and _trend_result.counter >= _ct_threshold:
                     if verbose:
-                        print(f"{log_prefix} 🚫 [COUNTER-TREND BLOCK] {_ct_threshold}/4 против + RSI={(md.rsi_1h or 50):.0f} < 70 — блок")
+                        print(f"{log_prefix} 🚫 [COUNTER-TREND BLOCK] {_ct_threshold}/4 против (RSI={(md.rsi_1h or 50):.0f}) — блок")
                     return None
         except Exception as _tr_e:
             logger.debug(f"[TrendDetector] short: {_tr_e}")
@@ -1603,6 +1662,18 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             if verbose:
                 print(f"{log_prefix} 🚫 [SYSTEMIC_PUMP] {state.pump_guard.reason} — SHORT на HTF=BULLISH заблокирован")
             return None
+
+        # BTC Momentum Guard — V-Shape Recovery / Rapid Bounce блок для SHORT
+        # Если BTC был в дампе и теперь быстро восстанавливается — шортить опасно
+        _btc_mg_mult = state.btc_momentum_guard.get_short_multiplier()
+        if _btc_mg_mult <= 0.0:
+            if verbose:
+                print(f"{log_prefix} 🚫 [BTC_VSHAPE] {state.btc_momentum_guard.reason} — SHORT заблокирован")
+            return None
+        if _btc_mg_mult < 1.0:
+            base_score = max(0, int(base_score * _btc_mg_mult))
+            if verbose:
+                print(f"{log_prefix} ⚠️ [BTC_VSHAPE] ×{_btc_mg_mult} → base_score={base_score:.1f} ({state.btc_momentum_guard.reason})")
 
         # #19: KillZoneFilter — бонус/штраф по времени сессии
         _kz_delta, _kz_reason = KillZoneFilter.get_adjustment()
@@ -2059,6 +2130,11 @@ async def scan_market():
     # D: SystemicPumpGuard — сбрасываем счётчики перед сканом, передаём BTC
     state.pump_guard.reset_cycle()
     state.pump_guard.update_btc(_btc_cache_1h or 0.0)
+
+    # BTC Momentum Guard — обновляем историю BTC 1h (V-shape detector)
+    state.btc_momentum_guard.update(_btc_cache_1h or 0.0)
+    if state.btc_momentum_guard.is_vshape_active:
+        print(f"⚠️ [BTC_MOMENTUM] V-Shape/Recovery активен: {state.btc_momentum_guard.reason}")
 
     # ✅ FIX БАГ 5: Параллельный pre-fetch — сокращает скан с ~5 мин до ~30с
     # SCAN_CONCURRENCY=8 означает 8 символов одновременно (по умолчанию)
