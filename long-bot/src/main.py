@@ -759,8 +759,17 @@ async def _get_btc_change_4h() -> Optional[float]:
         return None
 
 
+async def _get_btc_change_24h() -> float:
+    """BTC 24h изменение — для Relative Strength расчёта."""
+    try:
+        btc = await state.binance.get_complete_market_data("BTCUSDT")
+        return getattr(btc, "price_change_24h", 0.0) if btc else 0.0
+    except Exception:
+        return 0.0
 
-async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbose: bool = True) -> Optional[Dict]:
+
+
+async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbose: bool = True, cached_btc_24h: float = 0.0) -> Optional[Dict]:
     """
     Aegis Long scan_symbol v1.0:
     - SL НИЖЕ входа (Long)
@@ -1255,6 +1264,20 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 print(f"{log_prefix} 📊 [ONCHAIN] {_onchain_desc}")
             if base_result.funding_info:
                 print(f"{log_prefix} 💰 {base_result.funding_info}")
+
+        # ── Token Divergence Scorer: RS vs BTC + Volume + OI + Funding ─────────────
+        try:
+            from core.token_divergence_scorer import score_divergence as _score_div
+            _div_bonus, _div_reasons = _score_div(md, cached_btc_1h or 0.0, cached_btc_24h, "long")
+            if _div_bonus != 0:
+                effective_score = max(0, min(100, effective_score + _div_bonus))
+                if verbose:
+                    _dsign = "+" if _div_bonus >= 0 else ""
+                    _dreason = " | ".join(_div_reasons) if _div_reasons else ""
+                    print(f"{log_prefix} 🧩 [DIVERGENCE] {_dsign}{_div_bonus} → {effective_score}"
+                          + (f" | {_dreason}" if _dreason else ""))
+        except Exception:
+            pass
 
         if effective_score < min_score:
             # ✅ FIX P2: MOMENTUM PATH bypass — отдельный порог для momentum сделок
@@ -2006,6 +2029,7 @@ async def scan_market():
     # BTC data (главный фильтр для Long)
     _btc_cache_1h: Optional[float] = await _get_btc_change()
     _btc_cache_4h: Optional[float] = await _get_btc_change_4h()
+    _btc_cache_24h: float           = await _get_btc_change_24h()
     # ✅ BTC 4H тренд-блок: не открываем лонги если BTC в даунтренде на 4H
     if _btc_cache_4h is not None and Config.ENABLE_BTC_FILTER:
         if _btc_cache_4h <= Config.BTC_4H_BLOCK:
@@ -2090,7 +2114,7 @@ async def scan_market():
             try:
                 if _is_fresh(state.redis.get_signals(Config.BOT_TYPE, sym, limit=1)):
                     return sym, _FRESH
-                sig = await scan_symbol(sym, _btc_cache_1h)
+                sig = await scan_symbol(sym, _btc_cache_1h, cached_btc_24h=_btc_cache_24h)
                 return sym, sig
             except Exception as _pfe:
                 print(f"⚠️ Prefetch {sym}: {_pfe}")

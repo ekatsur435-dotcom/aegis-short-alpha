@@ -713,7 +713,7 @@ async def _count_real_positions() -> int:
         return 0
 
 
-async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbose: bool = True) -> Optional[Dict]:
+async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbose: bool = True, cached_btc_24h: float = 0.0) -> Optional[Dict]:
     """
     Aegis scan_symbol v1.0:
     - Параллельный расчёт через AegisSignalEngine
@@ -1170,6 +1170,20 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 print(f"{log_prefix} 📊 [ONCHAIN] {_onchain_desc}")
             if base_result.funding_info:
                 print(f"{log_prefix} 💰 {base_result.funding_info}")
+
+        # ── Token Divergence Scorer: RS vs BTC + Volume + OI + Funding ─────────────
+        try:
+            from core.token_divergence_scorer import score_divergence as _score_div
+            _div_bonus, _div_reasons = _score_div(md, cached_btc_1h or 0.0, cached_btc_24h, "short")
+            if _div_bonus != 0:
+                effective_score = max(0, min(100, effective_score + _div_bonus))
+                if verbose:
+                    _dsign = "+" if _div_bonus >= 0 else ""
+                    _dreason = " | ".join(_div_reasons) if _div_reasons else ""
+                    print(f"{log_prefix} 🧩 [DIVERGENCE] {_dsign}{_div_bonus} → {effective_score}"
+                          + (f" | {_dreason}" if _dreason else ""))
+        except Exception:
+            pass
 
         if effective_score < min_score:
             if verbose:
@@ -1956,11 +1970,13 @@ async def scan_market():
             return
 
     # BTC cache
-    _btc_cache_1h: Optional[float] = None
+    _btc_cache_1h:  Optional[float] = None
+    _btc_cache_24h: float           = 0.0
     try:
         _btc_md = await state.binance.get_complete_market_data("BTCUSDT")
         if _btc_md:
-            _btc_cache_1h = _btc_md.price_change_1h
+            _btc_cache_1h  = _btc_md.price_change_1h
+            _btc_cache_24h = getattr(_btc_md, "price_change_24h", 0.0) or 0.0
     except Exception:
         pass
 
@@ -2053,7 +2069,7 @@ async def scan_market():
             try:
                 if _is_fresh(state.redis.get_signals(Config.BOT_TYPE, sym, limit=1)):
                     return sym, _FRESH
-                sig = await scan_symbol(sym, _btc_cache_1h)
+                sig = await scan_symbol(sym, _btc_cache_1h, cached_btc_24h=_btc_cache_24h)
                 return sym, sig
             except Exception as _pfe:
                 print(f"⚠️ Prefetch {sym}: {_pfe}")

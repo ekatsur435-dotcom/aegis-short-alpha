@@ -89,6 +89,21 @@ services:
         value: "0.50"          # D: SystemicPumpGuard — >50% альтов price_trend=up → блок
       - key: SYSTEMIC_PUMP_COOLDOWN_MIN
         value: "30"            # D: SystemicPumpGuard — cooldown 30 мин после детекции
+      # ─── PUMP GUARD OUTLIER BYPASS (Блок 1) ──────────────────────────────
+      - key: PUMP_OUTLIER_PRICE_PCT
+        value: "15.0"          # SHORT bypass: токен падает ≥15%/24h при pump рынка → SHORT разрешён
+      - key: PUMP_OUTLIER_VOL_SPIKE
+        value: "2.0"           # SHORT bypass: volume_spike_ratio ≥ 2.0x при pump рынка
+      # ─── RELATIVE STRENGTH vs BTC (Блок 2) ───────────────────────────────
+      - key: ENABLE_RELATIVE_STRENGTH
+        value: "true"          # RS = token% - btc% для 1h и 24h
+      - key: RS_BONUS_MAX
+        value: "12"            # Макс бонус/штраф от RS (±12 очков к effective_score)
+      # ─── TOKEN DIVERGENCE SCORER (Блок 3) ────────────────────────────────
+      - key: ENABLE_DIVERGENCE_SCORER
+        value: "true"          # Composite: RS (35%) + Volume (25%) + OI (20%) + Funding (20%)
+      - key: DIVERGENCE_BONUS_MAX
+        value: "20"            # Макс composite бонус/штраф (±20 очков к effective_score)
       - key: RISK_PER_TRADE
         value: "0.001"
       - key: MAX_POSITION_PCT
@@ -391,6 +406,21 @@ services:
         value: "0.65"           # 65%+ альтов с отрицательной 1h → краш (было 0.80)
       - key: SYSTEMIC_CRASH_COOLDOWN_MIN
         value: "45"             # Блокировка LONG на 45 мин после краша (было 30)
+      # ─── CRASH GUARD OUTLIER BYPASS (Блок 1) ─────────────────────────────
+      - key: CRASH_OUTLIER_PRICE_PCT
+        value: "15.0"          # LONG bypass: токен растёт ≥15%/24h при crash рынка → LONG разрешён
+      - key: CRASH_OUTLIER_VOL_SPIKE
+        value: "2.0"           # LONG bypass: volume_spike_ratio ≥ 2.0x при crash рынка
+      # ─── RELATIVE STRENGTH vs BTC (Блок 2) ───────────────────────────────
+      - key: ENABLE_RELATIVE_STRENGTH
+        value: "true"          # RS = token% - btc% для 1h и 24h
+      - key: RS_BONUS_MAX
+        value: "12"            # Макс бонус/штраф от RS (±12 очков к effective_score)
+      # ─── TOKEN DIVERGENCE SCORER (Блок 3) ────────────────────────────────
+      - key: ENABLE_DIVERGENCE_SCORER
+        value: "true"          # Composite: RS (35%) + Volume (25%) + OI (20%) + Funding (20%)
+      - key: DIVERGENCE_BONUS_MAX
+        value: "20"            # Макс composite бонус/штраф (±20 очков к effective_score)
       # #19: KillZoneFilter
       - key: KILL_ZONE_BONUS
         value: "10"
