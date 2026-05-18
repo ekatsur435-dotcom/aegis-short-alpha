@@ -458,9 +458,11 @@ class AegisSignalEngine:
             elif _pp_action == "bypass":
                 _z_effective = 0
 
+        _bearish_cont_bypass = False  # v1: тренд-шорт без pump spike
         _z_gate_failed = z_vol and z_vol.raw_score < _z_effective
         if _z_gate_failed:
             _momentum_bypass = False
+            _bearish_cont_bypass = False
             if _ENABLE_MOMENTUM_SHORT:
                 _rsi     = getattr(market_data, "rsi_1h", 50)              or 50
                 _vol_spk = getattr(market_data, "volume_spike_ratio", 1.0) or 1.0
@@ -522,6 +524,7 @@ class AegisSignalEngine:
                         and _htf_is_bear_bc
                         and base_score >= _BEARISH_CONT_BASE_MIN):
                     _momentum_bypass = True
+                    _bearish_cont_bypass = True  # v1: смещаем вес в сторону base_score
                     all_reasons.append(
                         f"BEARISH CONT bypass: RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
                         f"24H={_p24h_bc:+.1f}% HTF={_htf_bc[:20]}"
@@ -595,9 +598,16 @@ class AegisSignalEngine:
 
         if base_score > 0:
             if base_score >= 70:
-                # Aegis — качественный фильтр: реальное взвешенное среднее 45/55
-                # Предотвращает inflate до 100% при слабом Aegis
-                final_score = total_weighted * 0.45 + base_score * 0.55
+                if _bearish_cont_bypass:
+                    # v1: тренд-шорт без pump spike → base_score главный (80/20)
+                    final_score = total_weighted * 0.20 + base_score * 0.80
+                    logger.info(
+                        f"[AEGIS BEARISH CONT SCORE] {symbol}: "
+                        f"tw={total_weighted:.1f}×0.20 + base={base_score:.0f}×0.80 = {final_score:.1f}"
+                    )
+                else:
+                    # Aegis — качественный фильтр: реальное взвешенное среднее 45/55
+                    final_score = total_weighted * 0.45 + base_score * 0.55
             elif base_score >= 58:
                 # Хороший базовый скор — base_score главный (70%), Aegis — фильтр
                 final_score = total_weighted * 0.30 + base_score * 0.70

@@ -2208,7 +2208,7 @@ async def _startup_sl_sync():
             # ✅ Защита от дублирования: проверяем Redis-ключ
             _dedup_key = f"sl_sync_done:short:{sym}"
             try:
-                if state.redis._client.exists(_dedup_key):
+                if state.redis.client.exists(_dedup_key):
                     print(f"[SL-SYNC] {sym} SHORT: уже синкован недавно — пропускаем")
                     continue
             except Exception:

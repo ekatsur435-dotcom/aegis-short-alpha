@@ -156,7 +156,7 @@ services:
       - key: BEARISH_CONT_RSI_MAX_SHORT
         value: "68"             # RSI ниже этого — даунтренд от перекупленного пика (было 55)
       - key: BEARISH_CONT_BASE_MIN_SHORT
-        value: "55"             # Минимальный BASE score для активации bypass
+        value: "70"             # v1: Минимальный BASE score для активации bypass (raised 55→70)
       - key: FUNDING_EXTREME_SHORT
         value: "0.05"           # ≥0.05%→score60, ≥0.10%→75, ≥0.15%→90 в AEGIS + BASE +10
       - key: ENABLE_TREND_DETECTOR
