@@ -220,6 +220,23 @@ class PositionTracker:
         if not symbol or not entry:
             return
 
+        # ── B4 FIX: SL ≈ entry при пустом taken_tps → плохая инициализация ──────
+        # BE после TP1 ставит SL=entry намеренно, но только ПОСЛЕ взятия TP1.
+        # Если taken=[] и SL≈entry — значит SL записан неверно при создании позиции.
+        if sl > 0 and not taken:
+            _sl_gap_pct = abs(sl - entry) / entry * 100
+            if _sl_gap_pct < 0.05:  # SL в пределах 0.05% от входа — это не настоящий SL
+                _fallback_sl_pct = 0.025
+                sl = entry * (1 - _fallback_sl_pct) if direction == "long" else entry * (1 + _fallback_sl_pct)
+                signal["stop_loss"] = sl
+                print(f"⚠️ [B4][VT][{symbol}] SL={signal.get('stop_loss', 0):.6f} ≈ entry "
+                      f"(taken=[]) — плохая инициализация, пересчитываем SL → {sl:.6f}")
+                try:
+                    vkey = f"{bot_type}:virtual_positions"
+                    self.redis.client.hset(vkey, field, _json.dumps(signal))
+                except Exception:
+                    pass
+
         # Экспирация 48ч
         opened_at = signal.get("virtual_opened_at", signal.get("timestamp", ""))
         if opened_at:
@@ -590,6 +607,19 @@ class PositionTracker:
             else:
                 print(f"❌ [PT][{symbol}] SL=0 — пропускаем позицию (невозможно отследить)")
                 return
+
+        # ── B4 FIX: SL ≈ entry при пустом taken_tps → плохая инициализация ──────
+        # BE после TP1/TP2 переносит SL к entry намеренно — но только ПОСЛЕ взятия TP.
+        # Если taken=[] и SL≈entry — запись была создана с неверным SL.
+        if not taken:
+            _sl_gap_pct = abs(sl - entry) / entry * 100
+            if _sl_gap_pct < 0.05:
+                _fallback_sl_pct = 0.025
+                sl = entry * (1 - _fallback_sl_pct) if direction == "long" else entry * (1 + _fallback_sl_pct)
+                signal["stop_loss"] = sl
+                self._save(symbol, signal)
+                print(f"⚠️ [B4][PT][{symbol}] SL≈entry (taken=[]) — плохая инициализация, "
+                      f"SL пересчитан → {sl:.6f} ({_fallback_sl_pct*100:.1f}%)")
 
         # 🎢 Phase 2: Инициализация Micro-Step Trailing при первом обнаружении позиции
         trailing_state = self.micro_trailing.get_state(symbol)
