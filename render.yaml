@@ -206,6 +206,15 @@ services:
         value: "75"              # score ≥ X + OI → полный bypass
       - key: PRE_PUMP_PRICE_POSITION
         value: "0.40"            # SHORT: цена должна быть в верхних 40% диапазона (ratio > 0.60)
+      # ─── ANTI-CATASTROPHE FILTERS (SUI/DYM/BLESS/ICNT FIX) ─────────────────
+      - key: SHORT_REQUIRE_PREMIUM
+        value: "true"            # true = SHORT только в PREMIUM zone (выше POC 4H). false = отключить.
+      - key: SHORT_RSI_OVERSOLD_BLOCK
+        value: "30"              # SHORT заблокирован если RSI < X. RSI<30 = экстремальная перепроданность.
+      - key: SHORT_BLOCK_AFTER_DROP_PCT
+        value: "7.0"             # 4H падение > X% + RSI<45 → блок (шортим дно). Также: 1H рост + 24H < -(X×1.5)%.
+      - key: SHORT_DROP_BYPASS_MIN_SCORE
+        value: "85"              # Исключение drop-фильтра для сигналов score >= X (BREAKOUT/WYCKOFF high-confidence).
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot
