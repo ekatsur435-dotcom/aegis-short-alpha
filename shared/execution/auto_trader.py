@@ -444,6 +444,10 @@ class AutoTrader:
                                       total_size, take_profits, direction,
                                       start_num: int = 1):
         await asyncio.sleep(1.5)
+
+        # B2 FIX (Variant A): чистим осиротевшие TP ордера перед выставлением новых
+        await self._cancel_orphaned_tp_orders()
+
         close_side = "SELL" if direction == "long" else "BUY"
         success = 0
         fails   = 0
@@ -491,9 +495,29 @@ class AutoTrader:
                     print(f"✅ TP{tp_num}: {bingx_symbol} id={order_id}")
                     success += 1
                 else:
-                    err = (result or {}).get("msg") or self.bingx.last_error or "unknown"
-                    print(f"⚠️ TP{tp_num} failed: {bingx_symbol} | {err}")
-                    fails += 1
+                    err_code = (result or {}).get("code")
+                    err      = (result or {}).get("msg") or self.bingx.last_error or "unknown"
+                    if err_code == 110206:
+                        # B2 FIX (Variant B): Too many orders — пауза 2s и 1 retry
+                        print(f"[B2 RETRY] TP{tp_num} {bingx_symbol}: 110206 too many orders — retry через 2s")
+                        await asyncio.sleep(2.0)
+                        retry_result = await self.bingx._make_request(
+                            "POST", "/openApi/swap/v2/trade/order", body=body
+                        )
+                        if retry_result and retry_result.get("code") == 0:
+                            rd       = retry_result.get("data", {})
+                            ord_rd   = rd.get("order", rd)
+                            order_id = ord_rd.get("orderId", "?")
+                            print(f"✅ TP{tp_num} (retry OK): {bingx_symbol} id={order_id}")
+                            success += 1
+                        else:
+                            retry_err = (retry_result or {}).get("msg") or "unknown"
+                            print(f"⚠️ TP{tp_num} retry failed: {bingx_symbol} | {retry_err} — прерываем")
+                            fails += 1
+                            break  # лимит не освободился — дальше ставить бессмысленно
+                    else:
+                        print(f"⚠️ TP{tp_num} failed: {bingx_symbol} | {err}")
+                        fails += 1
 
                 await asyncio.sleep(0.4)
             except Exception as e:
@@ -502,6 +526,59 @@ class AutoTrader:
 
         status = "✅" if success > 0 else "⚠️"
         print(f"{status} TP orders {bingx_symbol}: {success} placed, {fails} failed")
+
+    async def _cancel_orphaned_tp_orders(self) -> int:
+        """
+        B2 FIX (Variant A): Отменяем осиротевшие TAKE_PROFIT_MARKET ордера
+        (от уже закрытых позиций) перед выставлением новых TP.
+        Освобождает лимит ордеров на аккаунте BingX (~20-50 слотов).
+        """
+        try:
+            # 1. Все открытые ордера по аккаунту (без фильтра по символу)
+            all_result = await self.bingx._make_request(
+                "GET", "/openApi/swap/v2/trade/openOrders"
+            )
+            if not all_result or all_result.get("code") != 0:
+                print("[B2 ORPHAN] Не удалось получить все открытые ордера")
+                return 0
+
+            all_orders = all_result.get("data", {}).get("orders", [])
+            tp_orders = [o for o in all_orders if o.get("type") == "TAKE_PROFIT_MARKET"]
+            if not tp_orders:
+                return 0
+
+            # 2. Активные позиции — символы с ненулевым qty
+            active_positions = await self.bingx.get_positions()
+            active_symbols = {
+                p.symbol.replace("-", "")
+                for p in active_positions
+                if abs(getattr(p, "size", 0) or 0) > 0
+            }
+
+            # 3. Отменяем TP ордера без соответствующей позиции
+            cancelled = 0
+            for order in tp_orders:
+                o_symbol = order.get("symbol", "").replace("-", "")
+                o_id     = order.get("orderId", "")
+                if o_symbol and o_id and o_symbol not in active_symbols:
+                    cancel_res = await self.bingx._make_request(
+                        "DELETE", "/openApi/swap/v2/trade/order",
+                        body={"symbol": o_symbol, "orderId": str(o_id)}
+                    )
+                    if cancel_res and cancel_res.get("code") == 0:
+                        cancelled += 1
+                        print(f"[B2 ORPHAN] Отменён осиротевший TP id={o_id} ({o_symbol})")
+                    else:
+                        print(f"[B2 ORPHAN] Не удалось отменить TP id={o_id} ({o_symbol}): "
+                              f"{(cancel_res or {}).get('msg', self.bingx.last_error)}")
+                    await asyncio.sleep(0.2)  # rate limit
+
+            if cancelled:
+                print(f"[B2 ORPHAN] Итого отменено осиротевших TP: {cancelled}/{len(tp_orders)}")
+            return cancelled
+        except Exception as e:
+            print(f"[B2 ORPHAN] Exception: {e}")
+            return 0
 
     async def _ensure_sl(self, bingx_symbol: str, position_side: str,
                           stop_loss: float, direction: str,
