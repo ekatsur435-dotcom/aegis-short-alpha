@@ -187,6 +187,8 @@ services:
       - key: SL_COOLDOWN_HOURS
         value: "1.0"             # Блок повторного входа на символ после стопа (часов)
       # Pre-pump detector (SHORT: тихая вершина + OI + перегретый funding → bypass z_gate)
+      - key: EXTENDED_TP_SHORT
+        value: "true"            # true = 6 TP уровней для трендовых паттернов (false = стандартные 4)
       - key: ENABLE_PRE_PUMP_DETECTOR
         value: "true"
       - key: PRE_PUMP_ATR_SQUEEZE
@@ -381,7 +383,7 @@ services:
       - key: OHLCV_CACHE_TTL
         value: "0"               # 0 = авто (= SCAN_INTERVAL)
       - key: EXTENDED_TP_LONG
-        value: "false"           # true = 6 TP уровней для long-bot (false = стандартные 4)
+        value: "true"            # true = 6 TP уровней для long-bot (false = стандартные 4)
       # Pre-pump detector (LONG: тихое накопление + OI↑ + funding нейтральный → bypass z_gate)
       - key: ENABLE_PRE_PUMP_DETECTOR
         value: "true"
