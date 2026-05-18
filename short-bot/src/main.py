@@ -1217,6 +1217,51 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             except Exception as _ms_e:
                 pass  # MS bonus не критичен
 
+        # ── FTA (First Touch Area) Bonus ─────────────────────────────────────
+        # Усиливает бонус за ПЕРВОЕ касание OB/FVG — первый тест уровня самый сильный.
+        # Штрафует за истощённые (3+ раз протестированные) уровни.
+        if _ms is not None and state.redis:
+            try:
+                from utils.fta_tracker import FTATracker
+                _fta = FTATracker(state.redis.client, "short")
+                _fta_total = 0
+                _fta_parts = []
+
+                # Bearish OB 4H
+                if _ms.has_ob_4h and _ms.ob_bearish_4h:
+                    _lo, _hi = _ms.ob_bearish_4h
+                    if _lo <= price <= _hi * 1.02:
+                        _adj, _rsn = _fta.score_ob(symbol, _ms.ob_bearish_4h, "bearish", 10)
+                        _fta_total += _adj; _fta_parts.append(_rsn)
+
+                # Bearish FVG 4H
+                if _ms.has_fvg_4h and _ms.fvg_bearish_4h:
+                    _lo, _hi = _ms.fvg_bearish_4h
+                    if _lo <= price <= _hi * 1.02:
+                        _adj, _rsn = _fta.score_fvg(symbol, _ms.fvg_bearish_4h, "bearish", 8)
+                        _fta_total += _adj; _fta_parts.append(_rsn)
+
+                # Bearish OB Weekly (самый ценный уровень)
+                if _ms.has_ob_1w and _ms.ob_bearish_1w:
+                    _lo, _hi = _ms.ob_bearish_1w
+                    if _lo <= price <= _hi * 1.05:
+                        _adj, _rsn = _fta.score_ob(symbol, _ms.ob_bearish_1w, "bearish", 15)
+                        _fta_total += _adj; _fta_parts.append(_rsn)
+
+                # Bearish FVG Weekly
+                if _ms.has_fvg_1w and _ms.fvg_bearish_1w:
+                    _lo, _hi = _ms.fvg_bearish_1w
+                    if _lo <= price <= _hi * 1.05:
+                        _adj, _rsn = _fta.score_fvg(symbol, _ms.fvg_bearish_1w, "bearish", 12)
+                        _fta_total += _adj; _fta_parts.append(_rsn)
+
+                if _fta_total != 0:
+                    base_score = max(0, min(100, base_score + _fta_total))
+                    if verbose and _fta_parts:
+                        print(f"{log_prefix} 🎯 [FTA] {_fta_total:+d} | {' | '.join(_fta_parts[:2])}")
+            except Exception as _fta_e:
+                logger.debug(f"[FTA SHORT] {_fta_e}")
+
         # ── CASCADE SIGNAL Bonus (4H Fractal Raid → 1H SNR → 15M FVG) ──────
         _cas = getattr(md, "cascade_signal", None)
         if _cas is not None and _cas.has_signal and _cas.direction == "short":

@@ -277,9 +277,15 @@ def _detect_htf_structure(candles_4h: list) -> Tuple[str, str, float, float]:
     return "ranging", "neutral", swing_h, swing_l
 
 
-def _detect_fvg(candles: list, price: float, lookback: int = 15) -> Tuple[Optional[Tuple], Optional[Tuple], bool, bool]:
+def _detect_fvg(
+    candles: list,
+    price: float,
+    lookback: int = 15,
+    prox_pct: float = 1.5,
+) -> Tuple[Optional[Tuple], Optional[Tuple], bool, bool]:
     """
     Fair Value Gap на заданном ТФ.
+    prox_pct: % близости цены к gap (4H=1.5, 1W=8.0, 1M=15.0)
     Returns: (bearish_fvg, bullish_fvg, has_bearish, has_bullish)
     """
     bear_fvg = bull_fvg = None
@@ -287,31 +293,38 @@ def _detect_fvg(candles: list, price: float, lookback: int = 15) -> Tuple[Option
         return None, None, False, False
 
     slc = candles[-lookback:]
+    _prox = 1 + prox_pct / 100
+    _prox_inv = 1 - prox_pct / 100
     for i in range(len(slc) - 2):
-        # Медвежий FVG: low[i] > high[i+2]  (разрыв между свечами 0 и 2)
+        # Медвежий FVG: low[i] > high[i+2]
         if slc[i].low > slc[i + 2].high:
             gap_low   = slc[i + 2].high
             gap_high  = slc[i].low
-            # Проверяем что ещё не закрылся
             filled = any(slc[j].high >= gap_high for j in range(i + 1, len(slc)))
-            if not filled and price <= gap_high * 1.01:  # цена рядом
+            if not filled and price <= gap_high * _prox:
                 bear_fvg = (gap_low, gap_high)
-        # Бычий FVG: high[i+2] < low[i]  (разрыв снизу)
+        # Бычий FVG: high[i+2] < low[i]
         if slc[i + 2].low > slc[i].high:
             gap_low  = slc[i].high
             gap_high = slc[i + 2].low
-            filled = any(slc[j].low <= gap_low * 0.99 for j in range(i + 1, len(slc)))
-            if not filled and price >= gap_low * 0.99:
+            filled = any(slc[j].low <= gap_low * _prox_inv for j in range(i + 1, len(slc)))
+            if not filled and price >= gap_low * _prox_inv:
                 bull_fvg = (gap_low, gap_high)
 
     return bear_fvg, bull_fvg, bear_fvg is not None, bull_fvg is not None
 
 
-def _detect_ob(candles: list, price: float, lookback: int = 20) -> Tuple[Optional[Tuple], Optional[Tuple], bool, bool]:
+def _detect_ob(
+    candles: list,
+    price: float,
+    lookback: int = 20,
+    drop_threshold: float = 1.5,
+    prox_pct: float = 1.5,
+) -> Tuple[Optional[Tuple], Optional[Tuple], bool, bool]:
     """
     Order Block на заданном ТФ.
-    Медвежий OB: последняя бычья свеча перед сильным снижением.
-    Бычий OB: последняя медвежья свеча перед сильным ростом.
+    drop_threshold: минимальное движение после OB свечи (4H=1.5%, 1W=4.0%)
+    prox_pct: % близости цены к OB (4H=1.5%, 1W=5.0%)
     Returns: (bearish_ob, bullish_ob, has_bearish, has_bullish)
     """
     bear_ob = bull_ob = None
@@ -319,23 +332,25 @@ def _detect_ob(candles: list, price: float, lookback: int = 20) -> Tuple[Optiona
         return None, None, False, False
 
     slc = candles[-lookback:]
+    _prox_up  = 1 + prox_pct / 100
+    _prox_dn  = 1 - prox_pct / 100
     for i in range(len(slc) - 2):
         c = slc[i]
         # Медвежий OB: бычья свеча → потом падение
-        if c.close > c.open:  # бычья
+        if c.close > c.open:
             drop = (c.high - slc[i + 2].low) / c.high * 100 if c.high > 0 else 0
-            if drop > 1.5:  # падение > 1.5%
+            if drop > drop_threshold:
                 ob_low  = c.open
                 ob_high = c.high
-                if price <= ob_high * 1.01:  # цена рядом
+                if price <= ob_high * _prox_up:
                     bear_ob = (ob_low, ob_high)
         # Бычий OB: медвежья свеча → потом рост
-        if c.close < c.open:  # медвежья
+        if c.close < c.open:
             rise = (slc[i + 2].high - c.low) / c.low * 100 if c.low > 0 else 0
-            if rise > 1.5:
+            if rise > drop_threshold:
                 ob_low  = c.low
                 ob_high = c.open
-                if price >= ob_low * 0.99:
+                if price >= ob_low * _prox_dn:
                     bull_ob = (ob_low, ob_high)
 
     return bear_ob, bull_ob, bear_ob is not None, bull_ob is not None
@@ -492,11 +507,12 @@ def compute_market_structure(
         if len(_kw) >= 12:
             r.htf_structure_1w, r.htf_bias_1w, _, _ = _detect_htf_structure(_kw)
         if len(_kw) >= 5:
+            # Weekly: broader proximity (8%) and larger move thresholds (4%)
             r.fvg_bearish_1w, r.fvg_bullish_1w, _bfw, _bulfw = \
-                _detect_fvg(_kw, price, min(10, len(_kw)))
+                _detect_fvg(_kw, price, min(10, len(_kw)), prox_pct=8.0)
             r.has_fvg_1w = _bfw or _bulfw
             r.ob_bearish_1w, r.ob_bullish_1w, _bow, _bulow = \
-                _detect_ob(_kw, price, min(12, len(_kw)))
+                _detect_ob(_kw, price, min(12, len(_kw)), drop_threshold=4.0, prox_pct=5.0)
             r.has_ob_1w = _bow or _bulow
 
     # ── Monthly (1M) levels ────────────────────────────────────────────────────
