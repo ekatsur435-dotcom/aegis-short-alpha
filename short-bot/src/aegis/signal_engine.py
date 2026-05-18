@@ -473,17 +473,27 @@ class AegisSignalEngine:
                 if (_rsi <= _MOMENTUM_RSI_MAX_SHORT
                         and _vol_spk >= _MOMENTUM_VOL_MIN_SHORT
                         and (_p1h < _MOMENTUM_DOWNTREND_1H or _p4h < -5.0 or _p24h < -5.0)):
-                    _momentum_bypass = True
-                    all_reasons.append(
-                        f"MOMENTUM SHORT bypass: RSI={_rsi:.0f} Vol×{_vol_spk:.1f} "
-                        f"1H={_p1h:+.1f}% 4H={_p4h:+.1f}%"
-                    )
-                    logger.info(
-                        f"[AEGIS MOMENTUM SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
-                        f"→ Momentum bypass (RSI={_rsi:.0f} Vol×{_vol_spk:.1f} 1H={_p1h:+.1f}%)"
-                    )
-                    if _p24h < -15: final_score = min(final_score + 10, 100)
-                    elif _p24h < -8: final_score = min(final_score + 5, 100)
+                    # ANTI-CATASTROPHE: не даём Momentum bypass при RSI + пост-дамп условиях
+                    # SUI-паттерн: RSI<30 + 4H уже упал >7% = шортим дно, не продолжение тренда
+                    _ac_rsi_block  = float(os.getenv("SHORT_RSI_OVERSOLD_BLOCK",    "30"))
+                    _ac_drop_block = float(os.getenv("SHORT_BLOCK_AFTER_DROP_PCT", "7.0"))
+                    if _rsi < _ac_rsi_block and _p4h < -_ac_drop_block:
+                        logger.info(
+                            f"[AEGIS MOMENTUM CANCEL] {symbol}: RSI={_rsi:.0f} < {_ac_rsi_block} "
+                            f"+ 4H={_p4h:+.1f}% < -{_ac_drop_block}% — post-dump protection, bypass отменён"
+                        )
+                    else:
+                        _momentum_bypass = True
+                        all_reasons.append(
+                            f"MOMENTUM SHORT bypass: RSI={_rsi:.0f} Vol×{_vol_spk:.1f} "
+                            f"1H={_p1h:+.1f}% 4H={_p4h:+.1f}%"
+                        )
+                        logger.info(
+                            f"[AEGIS MOMENTUM SHORT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
+                            f"→ Momentum bypass (RSI={_rsi:.0f} Vol×{_vol_spk:.1f} 1H={_p1h:+.1f}%)"
+                        )
+                        if _p24h < -15: final_score = min(final_score + 10, 100)
+                        elif _p24h < -8: final_score = min(final_score + 5, 100)
 
             # Overbought SHORT bypass: RSI высокий + цена растёт + медвежий паттерн
             # Для случаев когда памп медленный (нет резкого volume spike, но перекуплено)
@@ -511,6 +521,7 @@ class AegisSignalEngine:
             # Bearish Continuation bypass: плавный даунтренд без pump spike (CETUS/AGI тип)
             if not _momentum_bypass and _ENABLE_BEARISH_CONT_SHORT:
                 _rsi_bc  = getattr(market_data, "rsi_1h", 50)           or 50
+                _p1h_bc  = getattr(market_data, "price_change_1h", 0)   or 0
                 _p4h_bc  = getattr(market_data, "price_change_4h", 0)   or 0
                 _p24h_bc = getattr(market_data, "price_change_24h", 0)  or 0
                 _htf_bc  = getattr(market_data, "htf_structure", "")    or ""
@@ -523,17 +534,27 @@ class AegisSignalEngine:
                         and (_p4h_bc < -2.0 or _p24h_bc < -8.0)
                         and _htf_is_bear_bc
                         and base_score >= _BEARISH_CONT_BASE_MIN):
-                    _momentum_bypass = True
-                    _bearish_cont_bypass = True  # v1: смещаем вес в сторону base_score
-                    all_reasons.append(
-                        f"BEARISH CONT bypass: RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
-                        f"24H={_p24h_bc:+.1f}% HTF={_htf_bc[:20]}"
-                    )
-                    logger.info(
-                        f"[AEGIS BEARISH CONT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
-                        f"→ Bearish continuation bypass (RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
-                        f"24H={_p24h_bc:+.1f}%)"
-                    )
+                    # ANTI-CATASTROPHE: DYM-паттерн — цена растёт 1H при 24H дампе = шортим отскок, НЕ продолжение
+                    _ac_drop_block_bc  = float(os.getenv("SHORT_BLOCK_AFTER_DROP_PCT", "7.0"))
+                    _ac_bounce_1h      = 1.0  # 1H рост > 1% = активный отскок
+                    _is_shorting_bounce = _p1h_bc > _ac_bounce_1h and _p24h_bc < -(_ac_drop_block_bc * 1.5)
+                    if _is_shorting_bounce:
+                        logger.info(
+                            f"[AEGIS BEARISH CONT CANCEL] {symbol}: 1H={_p1h_bc:+.1f}% растёт "
+                            f"при 24H={_p24h_bc:+.1f}% — DYM-паттерн, шортим отскок, bypass отменён"
+                        )
+                    else:
+                        _momentum_bypass = True
+                        _bearish_cont_bypass = True  # v1: смещаем вес в сторону base_score
+                        all_reasons.append(
+                            f"BEARISH CONT bypass: RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
+                            f"24H={_p24h_bc:+.1f}% HTF={_htf_bc[:20]}"
+                        )
+                        logger.info(
+                            f"[AEGIS BEARISH CONT] {symbol}: z_volume={z_vol.raw_score:.0f} < {_z_effective} "
+                            f"→ Bearish continuation bypass (RSI={_rsi_bc:.0f} 4H={_p4h_bc:+.1f}% "
+                            f"24H={_p24h_bc:+.1f}%)"
+                        )
 
             # Extreme Funding + Multi-Pattern bypass: шорты платят лонгистам + структурные паттерны
             if not _momentum_bypass and _ENABLE_EXTREME_FUNDING_BYPASS:

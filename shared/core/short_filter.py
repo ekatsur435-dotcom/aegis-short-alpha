@@ -103,33 +103,37 @@ class ShortFilter:
                 score_delta += 8
                 reasons.append(f"BTC падает {btc_price_1h_change:.1f}%/1ч → +8 к скору")
 
-        # ── 2. RSI анализ (НЕ блокирующий!) ───────────────────────────────
+        # ── 2. RSI анализ ─────────────────────────────────────────────────────
+        # ПРАВИЛО: SHORT открывается с ПЕРЕКУПЛЕННОСТИ (RSI 60-80), не с дна.
+        # FIX #4: RSI 30-45 давал бонусы (+3/+5) — КРИТИЧЕСКИ НЕВЕРНО.
+        # RSI < 45 = актив уже упал → вероятность V-отскока растёт.
+        # Hard block RSI < 30 в main.py; здесь — scoring-штрафы для пограничных зон.
         rsi = getattr(market_data, "rsi_1h", None)
         if rsi is not None:
             if rsi >= 70:
-                # Перекупленность — отличный сигнал для шорта
                 score_delta += 8
                 reasons.append(f"🔥 RSI {rsi:.1f} перекуплен — сильный шорт сигнал +8")
             elif rsi >= 60:
-                # Верхняя зона — хорошо для шорта
                 score_delta += 5
                 reasons.append(f"RSI {rsi:.1f} в верхней зоне — шорт фаворит +5")
             elif rsi >= 50:
-                # Нейтрально
                 score_delta += 2
                 reasons.append(f"RSI {rsi:.1f} выше 50 — небольшой бонус +2")
-            elif rsi >= 40:
-                # Ниже 50 — даунтренд подтверждается
-                score_delta += 3
-                reasons.append(f"RSI {rsi:.1f} в зоне даунтренда — подтверждение +3")
+            elif rsi >= 45:
+                score_delta += 0
+                reasons.append(f"RSI {rsi:.1f} нейтрально-нижняя — без коррекции")
+            elif rsi >= 35:
+                # FIX #4: было +3 "подтверждение даунтренда" — НЕВЕРНО.
+                score_delta -= 8
+                reasons.append(f"⚠️ RSI {rsi:.1f} перепродан — риск V-отскока -8")
             elif rsi >= 30:
-                # Низкий RSI при падении — моментум продолжается
-                score_delta += 5
-                reasons.append(f"RSI {rsi:.1f} низкий при падении — моментум +5")
+                # FIX #4: было +5 "моментум продолжается" — КРИТИЧЕСКИ НЕВЕРНО.
+                score_delta -= 15
+                reasons.append(f"⛔ RSI {rsi:.1f} сильно перепродан — высокий риск отскока -15")
             else:
-                # Очень низкий RSI (<30) — возможен отскок, но не блокируем!
-                score_delta -= 3
-                reasons.append(f"RSI {rsi:.1f} очень низкий — риск отскока -3")
+                # RSI < 30: hard block сработал раньше в main.py.
+                score_delta -= 25
+                reasons.append(f"🔴 RSI {rsi:.1f} экстремально перепродан — SHORT ЗАПРЕЩЁН -25")
 
         # ── 3. Фандинг-спайк (главный SHORT фактор) ──────────────────────
         funding = getattr(market_data, "funding_rate", 0) / 100  # уже в долях

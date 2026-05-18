@@ -1264,6 +1264,61 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 if verbose:
                     print(f"{log_prefix} ✅ [MULTI-TOUCH] +{_touch_bonus} — resistance touches={cons.resistance_touches}")
         
+        # ══════════════════════════════════════════════════════════════════════
+        # ANTI-CATASTROPHE HARD BLOCKS — FIX #1 / #2 / #3
+        # Корень убытков SUI/DYM/BLESS/ICNT: шорт у дна после дампа.
+        # Три условия полностью блокируют такие сигналы до ShortFilter/AEGIS.
+        # ══════════════════════════════════════════════════════════════════════
+
+        # FIX #1 — DISCOUNT ZONE: цена ниже POC 4H = институционалы покупают здесь
+        # SHORT в DISCOUNT = торговля против умных денег. HARD BLOCK.
+        _short_require_premium = os.getenv("SHORT_REQUIRE_PREMIUM", "true").lower() == "true"
+        if _short_require_premium and "discount" in _zone.lower():
+            if verbose:
+                print(
+                    f"{log_prefix} 🚫 [DISCOUNT BLOCK] zone={_zone!r} — "
+                    f"цена ниже POC 4H, институционалы покупают, SHORT запрещён"
+                )
+            return None
+
+        # FIX #2 — RSI OVERSOLD: актив перепродан → V-отскок вероятнее продолжения
+        # RSI < порог = КОНЕЦ дампа, не начало. Порог по умолчанию 30.
+        _short_rsi_oversold_block = float(os.getenv("SHORT_RSI_OVERSOLD_BLOCK", "30"))
+        _rsi_now = md.rsi_1h or 50
+        if _rsi_now < _short_rsi_oversold_block:
+            if verbose:
+                print(
+                    f"{log_prefix} 🚫 [RSI OVERSOLD BLOCK] RSI={_rsi_now:.1f} < {_short_rsi_oversold_block} — "
+                    f"перепродан, вероятность V-отскока критически высока, SHORT заблокирован"
+                )
+            return None
+
+        # FIX #3 — POST-DUMP BLOCK: актив уже упал → шортим дно, а не вершину
+        # Сценарий A: 4H падение > порог + RSI < 45 (дамп ещё не переварен)
+        # Сценарий B: шортим отскок — 1H растёт при 24H < -8% (DYM-паттерн)
+        _short_drop_block_pct = float(os.getenv("SHORT_BLOCK_AFTER_DROP_PCT", "7.0"))
+        _short_drop_bypass_score = float(os.getenv("SHORT_DROP_BYPASS_MIN_SCORE", "85"))
+        _p4h_now  = getattr(md, "price_change_4h", 0) or 0
+        _p1h_now  = getattr(md, "price_change_1h",  0) or 0
+        _p24h_now = md.price_change_24h or 0
+        if base_score < _short_drop_bypass_score:
+            # Сценарий A: тяжёлый 4H дамп + перепроданность
+            if _p4h_now < -_short_drop_block_pct and _rsi_now < 45:
+                if verbose:
+                    print(
+                        f"{log_prefix} 🚫 [POST-DUMP BLOCK A] 4H={_p4h_now:.1f}% RSI={_rsi_now:.1f} — "
+                        f"шортим дно после дампа, заблокирован"
+                    )
+                return None
+            # Сценарий B: шортим отскок — цена растёт 1H при большом 24H падении
+            if _p1h_now > 1.0 and _p24h_now < -(_short_drop_block_pct * 1.5):
+                if verbose:
+                    print(
+                        f"{log_prefix} 🚫 [POST-DUMP BLOCK B] 1H={_p1h_now:+.1f}% 24H={_p24h_now:.1f}% — "
+                        f"шортим отскок после крупного дампа, заблокирован"
+                    )
+                return None
+
         # ── SHORT-специфичные фильтры (сохраняем) ──
         sf   = get_short_filter()
         filt = sf.check(
