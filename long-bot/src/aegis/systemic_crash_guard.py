@@ -3,6 +3,11 @@ Aegis SystemicCrashGuard — A2
 Блокирует LONG позиции при системном краше рынка:
   - BTC падает ≤ -SYSTEMIC_CRASH_BTC_PCT%/час (default -5%)
   - 80%+ символов с отрицательной ценой за 1ч (alts breadth)
+
+Outlier bypass (is_crash_for_token):
+  Если конкретный токен price_24h > CRASH_OUTLIER_PRICE_PCT% (def 15%)
+  И volume_spike > CRASH_OUTLIER_VOL_SPIKE (def 2.0x) — токен divergирует
+  от краша, блок снимается индивидуально.
 """
 from __future__ import annotations
 import os
@@ -14,6 +19,8 @@ logger = logging.getLogger("aegis.systemic_crash_guard")
 _CRASH_BTC_PCT     = float(os.getenv("SYSTEMIC_CRASH_BTC_PCT",        "-5.0"))
 _CRASH_ALTS_RATIO  = float(os.getenv("SYSTEMIC_CRASH_ALTS_RATIO",      "0.80"))
 _CRASH_COOLDOWN_M  = int(os.getenv("SYSTEMIC_CRASH_COOLDOWN_MIN",       "30"))
+_OUTLIER_PRICE_PCT = float(os.getenv("CRASH_OUTLIER_PRICE_PCT",        "15.0"))
+_OUTLIER_VOL_SPIKE = float(os.getenv("CRASH_OUTLIER_VOL_SPIKE",         "2.0"))
 
 
 class SystemicCrashGuard:
@@ -70,6 +77,22 @@ class SystemicCrashGuard:
             return True
         self._crash_until = None
         return False
+
+    def is_crash_for_token(self, price_24h: float, vol_spike: float) -> bool:
+        """
+        Crash-блок с outlier bypass для конкретного токена.
+        Если токен price_24h > порог И volume_spike > порог —
+        он divergирует от рынка, блок снимается.
+        """
+        if not self.is_crash():
+            return False
+        if price_24h >= _OUTLIER_PRICE_PCT and vol_spike >= _OUTLIER_VOL_SPIKE:
+            logger.info(
+                f"[CRASH_GUARD] Outlier bypass: price_24h={price_24h:+.1f}% "
+                f"vol×{vol_spike:.1f} — токен divergирует, LONG разрешён"
+            )
+            return False
+        return True
 
     @property
     def reason(self) -> str:

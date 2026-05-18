@@ -1582,7 +1582,10 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             pass
 
         # D: SystemicPumpGuard — BTC +3%/1h + >50% альтов pump → блок SHORT на HTF=BULLISH
-        if state.pump_guard.is_pump() and _htf_is_bullish_short:
+        # Outlier bypass: если токен падает price_24h < -15% И vol_spike > 2x — bearish divergence
+        _pg_price_24h = getattr(md, "price_change_24h", 0.0) or 0.0
+        _pg_vol_spike = getattr(md, "volume_spike_ratio", 1.0) or 1.0
+        if state.pump_guard.is_pump_for_token(_pg_price_24h, _pg_vol_spike) and _htf_is_bullish_short:
             if verbose:
                 print(f"{log_prefix} 🚫 [SYSTEMIC_PUMP] {state.pump_guard.reason} — SHORT на HTF=BULLISH заблокирован")
             return None

@@ -4,6 +4,11 @@ Aegis SystemicPumpGuard — D
   - BTC растёт >= SYSTEMIC_PUMP_BTC_PCT%/час (default +3%)
   - >50% символов с price_trend=up (alts breadth)
 Блокирует только SHORT на символах с HTF=BULLISH (локально, попарно).
+
+Outlier bypass (is_pump_for_token):
+  Если конкретный токен падает price_24h < -PUMP_OUTLIER_PRICE_PCT% (def -15%)
+  И volume_spike > PUMP_OUTLIER_VOL_SPIKE (def 2.0x) — токен divergирует
+  против памп рынка, SHORT блок снимается индивидуально.
 """
 from __future__ import annotations
 import os
@@ -12,9 +17,11 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger("aegis.systemic_pump_guard")
 
-_PUMP_BTC_PCT    = float(os.getenv("SYSTEMIC_PUMP_BTC_PCT",    "3.0"))
-_PUMP_ALTS_RATIO = float(os.getenv("SYSTEMIC_PUMP_ALTS_RATIO", "0.50"))
-_PUMP_COOLDOWN_M = int(os.getenv("SYSTEMIC_PUMP_COOLDOWN_MIN", "30"))
+_PUMP_BTC_PCT         = float(os.getenv("SYSTEMIC_PUMP_BTC_PCT",    "3.0"))
+_PUMP_ALTS_RATIO      = float(os.getenv("SYSTEMIC_PUMP_ALTS_RATIO", "0.50"))
+_PUMP_COOLDOWN_M      = int(os.getenv("SYSTEMIC_PUMP_COOLDOWN_MIN", "30"))
+_OUTLIER_PRICE_BEAR   = float(os.getenv("PUMP_OUTLIER_PRICE_PCT",   "15.0"))  # падение ≥ этого %
+_OUTLIER_VOL_SPIKE    = float(os.getenv("PUMP_OUTLIER_VOL_SPIKE",    "2.0"))
 
 
 class SystemicPumpGuard:
@@ -66,6 +73,22 @@ class SystemicPumpGuard:
             return True
         self._pump_until = None
         return False
+
+    def is_pump_for_token(self, price_24h: float, vol_spike: float) -> bool:
+        """
+        Pump-блок с outlier bypass для конкретного токена.
+        Если токен падает price_24h < -порог И volume_spike > порог —
+        токен divergирует против памп рынка, SHORT разрешён.
+        """
+        if not self.is_pump():
+            return False
+        if price_24h <= -_OUTLIER_PRICE_BEAR and vol_spike >= _OUTLIER_VOL_SPIKE:
+            logger.info(
+                f"[PUMP_GUARD] Outlier bypass: price_24h={price_24h:+.1f}% "
+                f"vol×{vol_spike:.1f} — токен bearish divergence, SHORT разрешён"
+            )
+            return False
+        return True
 
     @property
     def reason(self) -> str:

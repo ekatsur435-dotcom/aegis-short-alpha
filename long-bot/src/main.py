@@ -810,8 +810,11 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         # A2: CrashGuard — регистрируем символ для alts breadth (FIX: было пропущено)
         state.crash_guard.update_symbol(getattr(md, "price_change_1h", 0.0) or 0.0)
 
-        # A2: SystemicCrashGuard — системный краш блокирует ВСЕ новые LONG
-        if state.crash_guard.is_crash():
+        # A2: SystemicCrashGuard — системный краш блокирует новые LONG
+        # Outlier bypass: если токен price_24h > 15% И vol_spike > 2x — divergence, разрешаем
+        _cg_price_24h = getattr(md, "price_change_24h", 0.0) or 0.0
+        _cg_vol_spike = getattr(md, "volume_spike_ratio", 1.0) or 1.0
+        if state.crash_guard.is_crash_for_token(_cg_price_24h, _cg_vol_spike):
             if verbose:
                 print(f"{log_prefix} 🆘 [SYSTEMIC_CRASH] {state.crash_guard.reason} — LONG заблокирован")
             return None
@@ -1151,6 +1154,13 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 if not isinstance(_oc_addr, Exception):
                     _addr_pct, _addr_raw_desc = _oc_addr
                     _addr_bonus, _addr_desc = addr_proxy_score_bonus(_addr_pct, "long")
+                    # Блок 2: при аномальном объёме (vol_chg > 200%) ADDR penalty отменяется —
+                    # объём сам по себе перевешивает сигнал адресной активности
+                    if _addr_bonus < 0:
+                        _vol_chg_24h = getattr(md, "volume_change_24h", 0.0) or 0.0
+                        if _vol_chg_24h > 200.0:
+                            _addr_bonus = 0
+                            _addr_desc  = f"⚡ [ADDR penalty отменён: vol_chg=+{_vol_chg_24h:.0f}%]"
                     if verbose and _addr_desc:
                         print(f"{log_prefix} 📊 [ADDR] {_addr_desc}")
         except Exception:
