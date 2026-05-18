@@ -1473,13 +1473,16 @@ class BinanceFuturesClient:
                 self.get_24h_ticker(symbol),
                 self.get_klines(symbol, "1h", 100),
                 self.get_klines(symbol, "15m", 75),   # 75 свечей = 18.75ч
-                self.get_klines(symbol, "30m", 75),   # ✅ NEW: 30m + ATR
-                self.get_klines(symbol, "4h",  50),   # ✅ NEW: 4H HTF structure
-                self.get_klines(symbol, "1d",  35),   # ✅ NEW: 35 дней PDH/PDL/ATH
+                self.get_klines(symbol, "30m", 75),   # 30m + ATR
+                self.get_klines(symbol, "4h",  50),   # 4H HTF structure
+                self.get_klines(symbol, "1d",  35),   # 35 дней PDH/PDL/ATH
+                self.get_klines(symbol, "1w",  20),   # 20 недель — Weekly SNR/OB/FVG
+                self.get_klines(symbol, "1M",   6),   # 6 месяцев — Monthly levels
                 return_exceptions=True
             )
 
-            price, funding, oi, ratio, ticker, klines_1h, klines_15m,                 klines_30m, klines_4h, klines_1d = results
+            price, funding, oi, ratio, ticker, klines_1h, klines_15m, \
+                klines_30m, klines_4h, klines_1d, klines_1w, klines_1M = results
 
             if isinstance(price, Exception) or not price:
                 self._mark_symbol_fail(symbol)
@@ -1498,6 +1501,8 @@ class BinanceFuturesClient:
             klines_30m = [] if isinstance(klines_30m, Exception) else (klines_30m or [])
             klines_4h  = [] if isinstance(klines_4h,  Exception) else (klines_4h  or [])
             klines_1d  = [] if isinstance(klines_1d,  Exception) else (klines_1d  or [])
+            klines_1w  = [] if isinstance(klines_1w,  Exception) else (klines_1w  or [])
+            klines_1M  = [] if isinstance(klines_1M,  Exception) else (klines_1M  or [])
 
             rsi = self._calculate_rsi([c.close for c in klines_1h])
 
@@ -1570,11 +1575,13 @@ class BinanceFuturesClient:
                         klines_1h=klines_1h,
                         klines_4h=klines_4h,
                         klines_1d=klines_1d,
+                        klines_1w=klines_1w or None,
+                        klines_1M=klines_1M or None,
                     )
                     if ms_result.key_levels:
                         nearest = ms_result.key_levels[:3]
                         lvl_str = ", ".join(f"{lbl}={px:.4f}" for px, lbl in nearest)
-                        logger.debug(f"[MS] {symbol}: {lvl_str} | {ms_result.htf_structure} | {ms_result.zone_4h}")
+                        logger.debug(f"[MS] {symbol}: {lvl_str} | HTF={ms_result.htf_structure} | 4H={ms_result.zone_4h} | 1W={ms_result.zone_weekly} | conf_s={ms_result.confluence_short}")
                 except Exception as _e:
                     logger.debug(f"[MS] {symbol} error: {_e}")
 
