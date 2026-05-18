@@ -528,6 +528,14 @@ class PositionTracker:
                         f"{price_diff}"
                         f"<i>⚠️ Позиция не найдена на бирже</i>"
                     ))
+
+                    # ✅ B8-FIX #5: Zombie позиции тоже пишем в all_trades для PatternML
+                    # Без этого PatternML никогда не видит zombie-закрытые сделки
+                    try:
+                        self.redis.remove_position(self.bot_type, symbol)
+                        await self._record_pnl(sig, pnl, "zombie", "ZOMBIE")
+                    except Exception as _rp_err:
+                        print(f"⚠️ [ZOMBIE] _record_pnl failed for {symbol}: {_rp_err}")
             except Exception as e:
                 print(f"⚠️ [ZOMBIE-CLEANUP] {symbol}: {e}")
 

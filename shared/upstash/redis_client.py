@@ -243,17 +243,35 @@ class UpstashRedisClient:
             if data:
                 position = json.loads(data)
                 position["status"] = "closed"
-                position["close_price"] = close_price
-                position["pnl"] = pnl
                 position["tp_level"] = tp_level  # ✅ FIX: Сохраняем tp_level
                 position["closed_at"] = datetime.utcnow().isoformat()
+
+                # ✅ B8-FIX #2: Восстанавливаем реальный close_price и pnl
+                # auto_trader.close_position() передаёт 0.0 — используем last_price из позиции
+                _entry = float(position.get("entry_price", 0) or 0)
+                _direction = position.get("direction", "long")
+                _actual_close = close_price if close_price > 0 else float(
+                    position.get("last_price", 0) or position.get("entry_price", 0) or 0
+                )
+                position["close_price"] = _actual_close
+
+                if pnl == 0.0 and _entry > 0 and _actual_close > 0:
+                    if _direction == "short":
+                        pnl = round((_entry - _actual_close) / _entry * 100, 4)
+                    else:
+                        pnl = round((_actual_close - _entry) / _entry * 100, 4)
+
+                position["pnl"]     = pnl
+                position["pnl_pct"] = pnl  # PatternML читает оба поля
+
                 history_key = f"{bot_type}:history:{symbol}"
                 self.client.lpush(history_key, json.dumps(position))
                 self.client.ltrim(history_key, 0, 99)
-                # 🆕 Также пишем в all_trades для статистики
+                # 🆕 Также пишем в all_trades для PatternML статистики
                 all_key = f"{bot_type}:all_trades"
                 self.client.lpush(all_key, json.dumps(position))
                 self.client.ltrim(all_key, 0, 9999)
+                self.client.expire(all_key, 7776000)  # 90 дней
                 self.client.delete(key)
                 return True
             return False

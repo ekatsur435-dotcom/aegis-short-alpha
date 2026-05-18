@@ -40,6 +40,59 @@ _CC_API_KEY       = os.getenv("CRYPTOCOMPARE_API_KEY", "")        # CryptoCompar
 _CC_BASE_URL      = "https://min-api.cryptocompare.com"
 _CG_ID_CACHE_TTL  = 86400                                          # 24ч — маппинг меняется редко
 
+# ── B7 FIX: Rate limiting + exponential backoff для CoinGecko ─────────────────
+# asyncio.Semaphore нельзя создавать при импорте (нет event loop) — lazy init
+_CG_SEM: Optional[asyncio.Semaphore] = None
+
+
+def _get_cg_sem() -> asyncio.Semaphore:
+    global _CG_SEM
+    if _CG_SEM is None:
+        _CG_SEM = asyncio.Semaphore(2)   # max 2 параллельных запроса к CoinGecko
+    return _CG_SEM
+
+
+async def _cg_fetch(url: str, params: dict) -> Tuple[int, Any]:
+    """
+    B7 FIX: CoinGecko GET с semaphore + 0.5s throttle + exponential backoff на 429.
+
+    Semaphore(2):  max 2 параллельных запроса (~4 req/s burst, CG demo limit: 500/min)
+    Backoff:       429 → sleep 1s / 2s / 4s, до 3 попыток
+    Returns:       (http_status, json_data) или (status, None) при ошибке
+    """
+    import aiohttp
+    sem = _get_cg_sem()
+    timeout = aiohttp.ClientTimeout(total=10)
+
+    async with sem:
+        await asyncio.sleep(0.5)    # inter-request throttle внутри semaphore
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession(
+                    timeout=timeout, headers=_cg_headers()
+                ) as sess:
+                    async with sess.get(url, params=params) as resp:
+                        if resp.status == 200:
+                            return 200, await resp.json()
+                        if resp.status == 429:
+                            wait = 2.0 ** attempt          # 1s → 2s → 4s
+                            logger.warning(
+                                f"[OnChain] 429 Too Many Requests — "
+                                f"backoff {wait:.0f}s (попытка {attempt + 1}/3)"
+                            )
+                            await asyncio.sleep(wait)
+                            continue                        # retry
+                        return resp.status, None           # другой не-200 — не ретраим
+            except asyncio.TimeoutError:
+                logger.debug(f"[OnChain] _cg_fetch timeout: {url}")
+                return 408, None
+            except Exception as e:
+                logger.debug(f"[OnChain] _cg_fetch error: {e}")
+                return 0, None
+        # Все 3 попытки на 429 исчерпаны
+        logger.warning(f"[OnChain] 429 — все 3 попытки исчерпаны: {url}")
+        return 429, None
+
 
 def _cg_headers() -> dict:
     """Заголовки для CoinGecko API. Demo key снимает 429-лимит (30 req/min → 500/min)."""
@@ -56,15 +109,11 @@ def _extract_base(symbol: str) -> str:
 async def _search_coingecko_dynamic(base: str) -> Optional[str]:
     """Динамический поиск CoinGecko ID по тикеру через /api/v3/search."""
     try:
-        import aiohttp
         url = f"{_CG_BASE_URL}/search"
         params = {"query": base}
-        timeout = aiohttp.ClientTimeout(total=8)
-        async with aiohttp.ClientSession(timeout=timeout, headers=_cg_headers()) as sess:
-            async with sess.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
+        status, data = await _cg_fetch(url, params)
+        if status != 200 or data is None:
+            return None
         for coin in data.get("coins", []):
             if coin.get("symbol", "").upper() == base.upper():
                 return coin["id"]
@@ -362,23 +411,18 @@ async def get_volume_z_score(
             return _fb
         return 0.0, f"[OnChain] {symbol}: нет маппинга CoinGecko/CMC/CC"
 
-    # Запрашиваем CoinGecko
+    # Запрашиваем CoinGecko (B7 FIX: через _cg_fetch с semaphore + retry)
     try:
-        import aiohttp
         url = f"{_CG_BASE_URL}/coins/{cg_id}/market_chart"
         params = {"vs_currency": "usd", "days": "14", "interval": "daily"}
 
-        timeout = aiohttp.ClientTimeout(total=10)
-
-        async with aiohttp.ClientSession(timeout=timeout, headers=_cg_headers()) as sess:
-            async with sess.get(url, params=params) as resp:
-                if resp.status != 200:
-                    _fb = _read_fallback_z(redis_client, symbol)
-                    if _fb:
-                        logger.info(f"[OnChain] {symbol}: HTTP {resp.status} → fallback z={_fb[0]:.1f}")
-                        return _fb
-                    return 0.0, f"[OnChain] HTTP {resp.status}"
-                raw = await resp.json()
+        status, raw = await _cg_fetch(url, params)
+        if status != 200 or raw is None:
+            _fb = _read_fallback_z(redis_client, symbol)
+            if _fb:
+                logger.info(f"[OnChain] {symbol}: HTTP {status} → fallback z={_fb[0]:.1f}")
+                return _fb
+            return 0.0, f"[OnChain] HTTP {status}"
 
         volumes = raw.get("total_volumes", [])
         if not volumes or len(volumes) < 5:
@@ -527,16 +571,13 @@ async def get_active_addr_proxy(
         return 0.0, f"[AddrProxy] {symbol}: нет маппинга CoinGecko/CMC/CC"
 
     try:
-        import aiohttp
         url = f"{_CG_BASE_URL}/coins/{cg_id}/market_chart"
         params = {"vs_currency": "usd", "days": "14", "interval": "daily"}
 
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout, headers=_cg_headers()) as sess:
-            async with sess.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return 0.0, f"[AddrProxy] HTTP {resp.status}"
-                raw = await resp.json()
+        # B7 FIX: через _cg_fetch с semaphore + retry на 429
+        status, raw = await _cg_fetch(url, params)
+        if status != 200 or raw is None:
+            return 0.0, f"[AddrProxy] HTTP {status}"
 
         volumes = raw.get("total_volumes", [])
         if not volumes or len(volumes) < 14:
