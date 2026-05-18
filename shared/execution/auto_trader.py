@@ -151,6 +151,7 @@ class AutoTrader:
                 smc_data         = signal.get("smc"),
                 tg_msg_id        = signal.get("tg_msg_id"),
                 ms_context       = {k: signal[k] for k in signal if k.startswith("ms_")},
+                pos_multiplier   = float(signal.get("pos_multiplier", 1.0)),
             )
         except KeyError as e:
             print(f"❌ [AutoTrader] {symbol}: missing field {e}")
@@ -162,7 +163,8 @@ class AutoTrader:
 
     async def open_position(self, symbol, direction, entry_price, stop_loss,
                             take_profits, signal_score, signal_leverage=0,
-                            smc_data=None, tg_msg_id=None, ms_context=None) -> Optional[Dict]:
+                            smc_data=None, tg_msg_id=None, ms_context=None,
+                            pos_multiplier: float = 1.0) -> Optional[Dict]:
         mode = "DEMO" if self.config.demo_mode else "REAL"
         pfx  = f"[AT][{symbol}][{direction.upper()}]"
 
@@ -294,9 +296,14 @@ class AutoTrader:
             print(f"{pfx} ❌ SKIP — no margin")
             return None
 
-        # ── 6. Sizing — FLAT risk, no multiplier ─────────────────────────────
-        # ✅ v3.0: risk_mult убран — фиксированный риск 0.04% на каждую сделку
+        # ── 6. Sizing — FLAT risk × context multiplier ───────────────────────
         actual_risk = self.config.risk_per_trade
+        if pos_multiplier <= 0.0:
+            print(f"{pfx} 🛑 SKIP — pos_multiplier=0.0 (hard block by context)")
+            return None
+        if pos_multiplier < 1.0:
+            actual_risk *= pos_multiplier
+            print(f"{pfx} ⚠️ Risk reduced ×{pos_multiplier} → {actual_risk:.6f} (market context)")
         risk_amount = available * actual_risk
         sl_distance = abs(entry_price - stop_loss) / entry_price
 
