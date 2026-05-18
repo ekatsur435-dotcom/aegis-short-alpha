@@ -124,6 +124,7 @@ from detectors.liquidation_mapper_long import LiquidationMapperLong
 from detectors.delta_analyzer_long import DeltaAnalyzerLong
 from detectors.netflow_analyzer import NetflowAnalyzerLong
 from core.kill_zone_filter import KillZoneFilter  # #19
+from core.btc_momentum_guard import BTCMomentumGuard
 
 
 # ============================================================================
@@ -278,6 +279,7 @@ class BotState:
         self.btc_change_1h:    Optional[float] = None  # ✅ FIX #5: кешируем BTC 1h для delta scorer
         # A2: SystemicCrashGuard
         self.crash_guard:      SystemicCrashGuard      = SystemicCrashGuard()
+        self.btc_momentum_guard: BTCMomentumGuard      = BTCMomentumGuard()
         # signals_db + trade_analytics
         self.signals_db        = None
         self._signal_db_map: dict = {}
@@ -827,6 +829,16 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             if verbose:
                 print(f"{log_prefix} 🆘 [SYSTEMIC_CRASH] {state.crash_guard.reason} — LONG заблокирован")
             return None
+
+        # ── BTCMomentumGuard: Rapid Dump блокирует LONG ───────────────
+        _btc_mg_long_mult = state.btc_momentum_guard.get_long_multiplier()
+        if _btc_mg_long_mult <= 0.0:
+            if verbose:
+                print(f"{log_prefix} 🚫 [BTC_RAPID_DUMP] {state.btc_momentum_guard.reason} — LONG заблокирован")
+            return None
+        if _btc_mg_long_mult < 1.0:
+            if verbose:
+                print(f"{log_prefix} ⚠️ [BTC_RAPID_DUMP] ×{_btc_mg_long_mult} — штраф ({state.btc_momentum_guard.reason})")
 
         # ── BTC фильтр для LONG (критичный) ─────────────────────────
         btc_1h = cached_btc_1h
@@ -1794,6 +1806,12 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         except Exception:
             pass
 
+        # ── BTCMomentumGuard штраф к base_score при Rapid Dump ──────
+        if _btc_mg_long_mult < 1.0:
+            base_score = max(0, int(base_score * _btc_mg_long_mult))
+            if verbose:
+                print(f"{log_prefix} ⚠️ [BTC_RAPID_DUMP] base_score ×{_btc_mg_long_mult} → {base_score}")
+
         # ── AEGIS LONG ENGINE ─────────────────────────────────────────
         aegis_signal = None
         aegis_components = {}
@@ -2041,6 +2059,10 @@ async def scan_market():
             print(f"📊 [BTC_4H_FILTER] BTC 4H {_btc_cache_4h:+.1f}% — OK для LONG")
     # ✅ FIX #5: сохраняем в state для delta scorer
     state.btc_change_1h = _btc_cache_1h
+    # BTCMomentumGuard: обновляем один раз за цикл
+    state.btc_momentum_guard.update(_btc_cache_1h or 0.0)
+    if state.btc_momentum_guard.is_vshape_active:
+        print(f"⚠️ [BTC_MOMENTUM] Rapid Dump активен: {state.btc_momentum_guard.reason}")
 
     # ✅ OPT: Batch-загрузка blacklist + skip:nodata в Python sets (2 Redis команды вместо ~1000)
     try:

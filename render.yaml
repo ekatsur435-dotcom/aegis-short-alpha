@@ -521,6 +521,17 @@ services:
         value: "88"              # Исключение Weekly PREMIUM блока для ultra-high-confidence сигналов score >= X.
       - key: LONG_BLOCK_WEEKLY_BEAR_OB
         value: "true"            # true = LONG заблокирован если цена в Weekly Bearish OB (стена продаж).
+      # ─── BTC Momentum Guard (Rapid Dump blocker for LONG) ───────────────────
+      - key: ENABLE_BTC_MOMENTUM_GUARD
+        value: "true"          # Блок LONG при Rapid Dump BTC (зеркально V-shape short-guard)
+      - key: BTC_VSHAPE_DUMP_THR
+        value: "-2.0"          # BTC был ниже -2%/1h → dump зафиксирован
+      - key: BTC_VSHAPE_RECOVERY_THR
+        value: "-0.5"          # BTC теперь выше -0.5%/1h → recovery началась
+      - key: BTC_VSHAPE_HISTORY_SIZE
+        value: "4"             # Окно памяти циклов для V-shape детекции
+      - key: BTC_RAPID_BOUNCE_PCT
+        value: "1.5"           # BTC вырос на 1.5% за N циклов = Rapid Bounce (для short-guard)
       # Signals DB
       - key: SIGNALS_DB_PATH
         value: "/opt/render/project/signals_long.db"
