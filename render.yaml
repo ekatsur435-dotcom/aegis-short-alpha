@@ -419,6 +419,13 @@ services:
         value: "75"
       - key: PRE_PUMP_PRICE_POSITION
         value: "0.40"            # LONG: цена должна быть в нижних 40% диапазона (ratio < 0.40)
+      # ─── WEEKLY SNR / OB / ZONE FILTERS (LONG) ───────────────────────────────
+      - key: LONG_REQUIRE_DISCOUNT
+        value: "true"            # true = LONG блокирован в Weekly PREMIUM (умные деньги продают). false = отключить.
+      - key: LONG_WEEKLY_PREMIUM_BYPASS_SCORE
+        value: "88"              # Исключение Weekly PREMIUM блока для ultra-high-confidence сигналов score >= X.
+      - key: LONG_BLOCK_WEEKLY_BEAR_OB
+        value: "true"            # true = LONG заблокирован если цена в Weekly Bearish OB (стена продаж).
       # Signals DB
       - key: SIGNALS_DB_PATH
         value: "/opt/render/project/signals_long.db"

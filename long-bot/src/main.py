@@ -1062,9 +1062,10 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         _p1h     = getattr(md, 'price_change_1h', 0.0) or 0.0
         _vol_sp  = getattr(md, 'volume_spike_ratio', 1.0) or 1.0
         # HTF structure и zone из market_structure
-        _ms_s    = getattr(md, 'market_structure', None)
-        _htf_str = getattr(_ms_s, 'htf_structure', '') or ''
-        _zone    = getattr(_ms_s, 'zone_4h', '') or ''
+        _ms_s        = getattr(md, 'market_structure', None)
+        _htf_str     = getattr(_ms_s, 'htf_structure', '') or ''
+        _zone        = getattr(_ms_s, 'zone_4h', '') or ''
+        _zone_weekly = getattr(_ms_s, 'zone_weekly',  '') or ''
         # 30M delta — вычисляем из уже загруженных 30m свечей (без доп. API вызова)
         _delta_30m = []
         if ohlcv_30m:
@@ -1274,9 +1275,42 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
 
         price      = md.price
         base_score = effective_score
-        
+
+        # ══════════════════════════════════════════════════════════════════════
+        # ANTI-CATASTROPHE HARD BLOCKS (LONG)
+        # Не входить в LONG в недельных зонах продаж — так же как SHORT не
+        # входит в weekly DISCOUNT. Это защита от покупки у институциональных
+        # уровней сопротивления на PREMIUM неделях.
+        # ══════════════════════════════════════════════════════════════════════
+        _long_require_discount = os.getenv("LONG_REQUIRE_DISCOUNT", "true").lower() == "true"
+        if _long_require_discount and _ms_s:
+            # Блок 1: Weekly PREMIUM — цена выше недельного POC, умные деньги продают
+            if "premium" in _zone_weekly.lower():
+                _long_weekly_prem_bypass = float(os.getenv("LONG_WEEKLY_PREMIUM_BYPASS_SCORE", "88"))
+                if effective_score < _long_weekly_prem_bypass:
+                    if verbose:
+                        print(
+                            f"{log_prefix} 🚫 [WEEKLY PREMIUM BLOCK] zone_weekly={_zone_weekly!r} — "
+                            f"цена в WEEKLY PREMIUM, умные деньги продают, LONG заблокирован"
+                        )
+                    return None
+
+            # Блок 2: Цена внутри Weekly Bearish OB — мощная стена продаж сверху
+            _long_block_bear_ob_1w = os.getenv("LONG_BLOCK_WEEKLY_BEAR_OB", "true").lower() == "true"
+            if _long_block_bear_ob_1w:
+                _ob_bear_1w = getattr(_ms_s, 'ob_bearish_1w', None)
+                if _ob_bear_1w:
+                    _ob_lo, _ob_hi = _ob_bear_1w
+                    if _ob_lo > 0 and _ob_lo <= price <= _ob_hi * 1.02:
+                        if verbose:
+                            print(
+                                f"{log_prefix} 🚫 [WEEKLY BEAR OB BLOCK] цена {price:.4f} внутри "
+                                f"Bearish OB Weekly [{_ob_lo:.4f}–{_ob_hi:.4f}] — LONG заблокирован"
+                            )
+                        return None
+
         # ── Market Structure Bonus (HTF) ─────────────────────────────────────
-        # PDH/PDL, Fib 0.618, OB/FVG 4H, CRT, HTF structure
+        # PDH/PDL, Fib 0.618, OB/FVG 4H/1W, CRT, HTF structure, confluence
         _ms = getattr(md, "market_structure", None)
         if _ms is not None:
             try:
@@ -1285,10 +1319,53 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                 if _ms_bonus != 0:
                     base_score = max(0, min(100, base_score + _ms_bonus))
                     if verbose and _ms_reasons:
-                        print(f"{log_prefix} 🏗 [MS] {' | '.join(_ms_reasons[:3])}")
+                        print(f"{log_prefix} 🏗 [MS] {' | '.join(_ms_reasons[:4])}")
             except Exception as _ms_e:
                 pass  # MS bonus не критичен
-        
+
+        # ── FTA (First Touch Area) Bonus ─────────────────────────────────────
+        # Первое касание Bullish OB/FVG (4H и Weekly) — самая сильная реакция.
+        if _ms is not None and state.redis:
+            try:
+                from utils.fta_tracker import FTATracker
+                _fta = FTATracker(state.redis.client, "long")
+                _fta_total = 0
+                _fta_parts = []
+
+                # Bullish OB 4H
+                if _ms.has_ob_4h and _ms.ob_bullish_4h:
+                    _lo, _hi = _ms.ob_bullish_4h
+                    if _lo * 0.98 <= price <= _hi:
+                        _adj, _rsn = _fta.score_ob(symbol, _ms.ob_bullish_4h, "bullish", 10)
+                        _fta_total += _adj; _fta_parts.append(_rsn)
+
+                # Bullish FVG 4H
+                if _ms.has_fvg_4h and _ms.fvg_bullish_4h:
+                    _lo, _hi = _ms.fvg_bullish_4h
+                    if _lo * 0.98 <= price <= _hi:
+                        _adj, _rsn = _fta.score_fvg(symbol, _ms.fvg_bullish_4h, "bullish", 8)
+                        _fta_total += _adj; _fta_parts.append(_rsn)
+
+                # Bullish OB Weekly (критично для лонга!)
+                if _ms.has_ob_1w and _ms.ob_bullish_1w:
+                    _lo, _hi = _ms.ob_bullish_1w
+                    if _lo * 0.95 <= price <= _hi:
+                        _adj, _rsn = _fta.score_ob(symbol, _ms.ob_bullish_1w, "bullish", 15)
+                        _fta_total += _adj; _fta_parts.append(_rsn)
+
+                # Bullish FVG Weekly
+                if _ms.has_fvg_1w and _ms.fvg_bullish_1w:
+                    _lo, _hi = _ms.fvg_bullish_1w
+                    if _lo * 0.95 <= price <= _hi:
+                        _adj, _rsn = _fta.score_fvg(symbol, _ms.fvg_bullish_1w, "bullish", 12)
+                        _fta_total += _adj; _fta_parts.append(_rsn)
+
+                if _fta_total != 0:
+                    base_score = max(0, min(100, base_score + _fta_total))
+                    if verbose and _fta_parts:
+                        print(f"{log_prefix} 🎯 [FTA] {_fta_total:+d} | {' | '.join(_fta_parts[:2])}")
+            except Exception as _fta_e:
+                logger.debug(f"[FTA LONG] {_fta_e}")
 
         # ── CASCADE SIGNAL Bonus (4H Fractal Raid → 1H SNR → 15M FVG) ──────
         _cas = getattr(md, "cascade_signal", None)
