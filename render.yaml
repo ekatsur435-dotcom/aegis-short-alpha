@@ -44,7 +44,7 @@ services:
       - key: MAX_PAIRS
         value: "200"
       - key: MAX_WATCHLIST
-        value: "1000"
+        value: "150"             # FIX: 1000→150 — Render Starter 512MB, OOM при >200
       - key: MIN_SHORT_SCORE
         value: "65"          # AEGIS final threshold
       - key: MIN_SHORT_BASE_SCORE
@@ -56,7 +56,7 @@ services:
       - key: SCAN_INTERVAL
         value: "180"          # П8: было 180 → 120s
       - key: SCAN_CONCURRENCY
-        value: "20"           # Параллельность сканирования (default=12 → 20, +67% throughput)
+        value: "8"            # FIX: 20→8 — Render Starter OOM fix (512MB limit)
       - key: MAX_SHORT_POSITIONS
         value: "15"           # Лимит SHORT позиций (независимо от LONG-бота)
       - key: SHORT_SL_BUFFER
@@ -277,10 +277,6 @@ services:
         value: "true"            # true = SHORT только в PREMIUM zone (выше POC 4H). false = отключить.
       - key: SHORT_RSI_OVERSOLD_BLOCK
         value: "30"              # SHORT заблокирован если RSI < X. RSI<30 = экстремальная перепроданность.
-      - key: SHORT_BLOCK_AFTER_DROP_PCT
-        value: "7.0"             # 4H падение > X% + RSI<45 → блок (шортим дно). Также: 1H рост + 24H < -(X×1.5)%.
-      - key: SHORT_DROP_BYPASS_MIN_SCORE
-        value: "85"              # Исключение drop-фильтра для сигналов score >= X (BREAKOUT/WYCKOFF high-confidence).
       # ─── WEEKLY SNR / OB / ZONE FILTERS ─────────────────────────────────────
       - key: SHORT_BLOCK_WEEKLY_BULL_OB
         value: "true"            # true = SHORT заблокирован если цена в Weekly Bullish OB (институциональная покупка).
@@ -325,7 +321,7 @@ services:
       - key: MAX_PAIRS
         value: "200"
       - key: MAX_WATCHLIST
-        value: "2000"
+        value: "150"             # FIX: 2000→150 — Render Starter 512MB, OOM fix
       - key: MIN_LONG_SCORE
         value: "72"           # AEGIS final threshold
       - key: MIN_LONG_BASE_SCORE
@@ -335,7 +331,7 @@ services:
       - key: SCAN_INTERVAL
         value: "180"          # Long чуть медленнее short
       - key: SCAN_CONCURRENCY
-        value: "20"           # Параллельность сканирования (default=12 → 20, +67% throughput)
+        value: "8"            # FIX: 20→8 — Render Starter OOM fix
       - key: MAX_LONG_POSITIONS
         value: "15"           # Лимит LONG позиций (независимо от SHORT-бота)
       - key: LONG_SL_BUFFER
