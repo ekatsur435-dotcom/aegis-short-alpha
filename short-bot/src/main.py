@@ -1894,6 +1894,8 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             "ms_has_cme_gap":   bool(getattr(_ms_log, "has_cme_gap",   False)) if _ms_log else False,
             "ms_zone_4h":       getattr(_ms_log, "zone_4h", "neutral") if _ms_log else "neutral",
             "ms_htf_structure": getattr(_ms_log, "htf_structure", "unknown") if _ms_log else "unknown",
+            # Block 5: risk size multiplier based on BTC market context
+            "pos_multiplier":   state.pump_guard.get_position_multiplier() if hasattr(state, "pump_guard") else 1.0,
         }
         
         print(f"🟢 [SIGNAL] {symbol}: score={final_score:.1f} grade={signal['grade']} — сигнал создан и отправлен в Telegram!")

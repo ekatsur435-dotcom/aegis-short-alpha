@@ -101,9 +101,23 @@ services:
         value: "12"            # Макс бонус/штраф от RS (±12 очков к effective_score)
       # ─── TOKEN DIVERGENCE SCORER (Блок 3) ────────────────────────────────
       - key: ENABLE_DIVERGENCE_SCORER
-        value: "true"          # Composite: RS (35%) + Volume (25%) + OI (20%) + Funding (20%)
+        value: "true"          # Composite: RS (30%) + Volume (22%) + OI (18%) + Funding (18%) + CVD (12%)
       - key: DIVERGENCE_BONUS_MAX
         value: "20"            # Макс composite бонус/штраф (±20 очков к effective_score)
+      # Block 6: CVD / Taker component
+      - key: ENABLE_CVD_COMPONENT
+        value: "true"          # CVD taker buy/sell ratio как 5й компонент дивергенции
+      - key: CVD_BUY_THRESHOLD
+        value: "0.55"          # >0.55 = buy pressure для LONG
+      - key: CVD_SELL_THRESHOLD
+        value: "0.45"          # <0.45 = sell pressure для SHORT
+      # Block 5: Risk multiplier thresholds (pump guard)
+      - key: PUMP_RISK_MULT_BLOCK_PCT
+        value: "8.0"           # BTC +8%/1h → SHORT полностью заблокирован (mult=0.0)
+      - key: PUMP_RISK_MULT_HALF_PCT
+        value: "5.0"           # BTC +5%/1h → SHORT риск ×0.5
+      - key: PUMP_RISK_MULT_REDUCE_PCT
+        value: "3.0"           # BTC +3%/1h → SHORT риск ×0.75
       - key: RISK_PER_TRADE
         value: "0.001"
       - key: MAX_POSITION_PCT
@@ -418,9 +432,23 @@ services:
         value: "12"            # Макс бонус/штраф от RS (±12 очков к effective_score)
       # ─── TOKEN DIVERGENCE SCORER (Блок 3) ────────────────────────────────
       - key: ENABLE_DIVERGENCE_SCORER
-        value: "true"          # Composite: RS (35%) + Volume (25%) + OI (20%) + Funding (20%)
+        value: "true"          # Composite: RS (30%) + Volume (22%) + OI (18%) + Funding (18%) + CVD (12%)
       - key: DIVERGENCE_BONUS_MAX
         value: "20"            # Макс composite бонус/штраф (±20 очков к effective_score)
+      # Block 6: CVD / Taker component
+      - key: ENABLE_CVD_COMPONENT
+        value: "true"          # CVD taker buy/sell ratio как 5й компонент дивергенции
+      - key: CVD_BUY_THRESHOLD
+        value: "0.55"          # >0.55 = buy pressure для LONG
+      - key: CVD_SELL_THRESHOLD
+        value: "0.45"          # <0.45 = sell pressure для SHORT
+      # Block 5: Risk multiplier thresholds (crash guard)
+      - key: CRASH_RISK_MULT_BLOCK_PCT
+        value: "-8.0"          # BTC -8%/1h → LONG полностью заблокирован (mult=0.0)
+      - key: CRASH_RISK_MULT_HALF_PCT
+        value: "-5.0"          # BTC -5%/1h → LONG риск ×0.5
+      - key: CRASH_RISK_MULT_REDUCE_PCT
+        value: "-3.0"          # BTC -3%/1h → LONG риск ×0.75
       # #19: KillZoneFilter
       - key: KILL_ZONE_BONUS
         value: "10"

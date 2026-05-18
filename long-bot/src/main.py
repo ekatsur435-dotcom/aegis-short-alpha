@@ -1951,6 +1951,8 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             "ms_has_cme_gap":   bool(getattr(_ms_data, "has_cme_gap",   False)) if _ms_data else False,
             "ms_zone_4h":       getattr(_ms_data, "zone_4h", "neutral") if _ms_data else "neutral",
             "ms_htf_structure": getattr(_ms_data, "htf_structure", "unknown") if _ms_data else "unknown",
+            # Block 5: risk size multiplier based on BTC market context
+            "pos_multiplier":   state.crash_guard.get_position_multiplier() if hasattr(state, "crash_guard") else 1.0,
         }
 
         if verbose:

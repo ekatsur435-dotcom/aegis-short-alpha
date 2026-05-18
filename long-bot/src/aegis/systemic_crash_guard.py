@@ -22,6 +22,11 @@ _CRASH_COOLDOWN_M  = int(os.getenv("SYSTEMIC_CRASH_COOLDOWN_MIN",       "30"))
 _OUTLIER_PRICE_PCT = float(os.getenv("CRASH_OUTLIER_PRICE_PCT",        "15.0"))
 _OUTLIER_VOL_SPIKE = float(os.getenv("CRASH_OUTLIER_VOL_SPIKE",         "2.0"))
 
+# Risk multiplier thresholds (BTC 1h change)
+_RISK_MULT_HARD_BLOCK = float(os.getenv("CRASH_RISK_MULT_BLOCK_PCT",  "-8.0"))   # 0.0x — hard block
+_RISK_MULT_HALF       = float(os.getenv("CRASH_RISK_MULT_HALF_PCT",   "-5.0"))   # 0.5x
+_RISK_MULT_REDUCE     = float(os.getenv("CRASH_RISK_MULT_REDUCE_PCT", "-3.0"))   # 0.75x
+
 
 class SystemicCrashGuard:
     """
@@ -93,6 +98,21 @@ class SystemicCrashGuard:
             )
             return False
         return True
+
+    def get_position_multiplier(self) -> float:
+        """
+        Risk size multiplier based on current BTC 1h momentum.
+        Returns 0.0 (hard block), 0.5, 0.75, or 1.0.
+        Independent of crash cooldown — reflects live market intensity.
+        """
+        btc = self._btc_change_1h
+        if btc <= _RISK_MULT_HARD_BLOCK:
+            return 0.0
+        if btc <= _RISK_MULT_HALF:
+            return 0.5
+        if btc <= _RISK_MULT_REDUCE:
+            return 0.75
+        return 1.0
 
     @property
     def reason(self) -> str:
