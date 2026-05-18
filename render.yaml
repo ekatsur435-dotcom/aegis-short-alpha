@@ -70,7 +70,7 @@ services:
       - key: ATR_SL_MIN_PCT
         value: "1.5"           # Мин ATR SL от входа
       - key: ATR_SL_MAX_PCT
-        value: "4.0"           # Макс ATR SL от входа
+        value: "3.5"           # B3 FIX: SHORT фиксированный TP1=3% → SL>3.5% убивает RR<1.0
       - key: MIN_VOLUME_USDT
         value: "200000"       # П15: было 300000 → 150000
       - key: ACCOUNT_CAPITAL_USD
@@ -261,6 +261,8 @@ services:
         value: "3.0"
       - key: SWING_SL_MIN_PCT
         value: "2.5"             # Увеличено 2.0→2.5: низколиквидные альты требуют запас
+      - key: ATR_SL_MAX_PCT
+        value: "5.0"             # B3 FIX: LONG DCA масштабирует TP1 под SL → RR=1.0 при любом SL
       - key: ATR_SL_MIN_PCT
         value: "2.5"             # Увеличено 2.0→2.5
       - key: LONG_SL_HARD_MIN_PCT
