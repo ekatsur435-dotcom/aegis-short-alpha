@@ -118,6 +118,43 @@ services:
         value: "5.0"           # BTC +5%/1h → SHORT риск ×0.5
       - key: PUMP_RISK_MULT_REDUCE_PCT
         value: "3.0"           # BTC +3%/1h → SHORT риск ×0.75
+      # ─── P0: Counter-Trend Block (RSI gate removed, threshold tuning) ────────
+      - key: SHORT_BLOCK_AFTER_DROP_PCT
+        value: "4.0"           # P0b: FIX 7.0→4.0 — блок раньше при 4H дампе
+      - key: SHORT_DROP_BYPASS_MIN_SCORE
+        value: "85"            # score ≥ 85 разрешает bypass post-dump блока
+      # ─── P0c: BTC direction thresholds (ShortFilter) ─────────────────────────
+      - key: SHORT_FILTER_BTC_BLOCK_PCT
+        value: "4.0"           # BTC +4%/1h → SHORT полностью заблокирован
+      - key: SHORT_FILTER_BTC_MODERATE_PCT
+        value: "1.0"           # P0c: FIX 2.0→1.0 — штраф -10 раньше при recovery
+      # ─── P1: BTC Momentum Guard (V-Shape detector) ───────────────────────────
+      - key: ENABLE_BTC_MOMENTUM_GUARD
+        value: "true"          # P1: детект V-shape BTC recovery → блок SHORT
+      - key: BTC_VSHAPE_DUMP_THR
+        value: "-2.0"          # BTC был ≤ -2%/1h = "dump зафиксирован"
+      - key: BTC_VSHAPE_RECOVERY_THR
+        value: "-0.5"          # BTC теперь ≥ -0.5%/1h = "recovery активна" → блок
+      - key: BTC_VSHAPE_HISTORY_SIZE
+        value: "4"             # Окно памяти: последние 4 цикла скана
+      - key: BTC_RAPID_BOUNCE_PCT
+        value: "1.5"           # Рост BTC на 1.5% за N циклов = rapid bounce
+      # ─── P2: Momentum Exhaustion Filter ──────────────────────────────────────
+      - key: ENABLE_MOMENTUM_EXHAUSTION
+        value: "true"          # P2: блок SHORT на истощённом momentum (SWARMS/BOME-паттерн)
+      - key: EXHAUSTION_DROP_4H
+        value: "-6.0"          # 4H упал ≥ 6% → актив уже на дне
+      - key: EXHAUSTION_DROP_24H
+        value: "-15.0"         # 24H упал ≥ 15% + RSI перепродан → блок
+      - key: EXHAUSTION_RSI_MAX
+        value: "38.0"          # RSI < 38 = перепродан на момент exhaustion
+      # ─── P3: Anti-Chasing Filter ─────────────────────────────────────────────
+      - key: ENABLE_ANTI_CHASING
+        value: "true"          # P3: блок если цена уже отскочила X% от low (шорт на дне)
+      - key: ANTI_CHASE_CANDLES
+        value: "4"             # Окно: последние 4 свечи 15m
+      - key: ANTI_CHASE_PCT
+        value: "2.5"           # Отскок ≥ 2.5% от low за 4×15m → вход запрещён
       - key: RISK_PER_TRADE
         value: "0.001"
       - key: MAX_POSITION_PCT
