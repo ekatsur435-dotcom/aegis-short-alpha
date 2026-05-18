@@ -56,6 +56,10 @@ if not logging.root.handlers:
 _dedup_filter = _DedupLogFilter()
 logging.getLogger("aegis.signal_engine_long").addFilter(_dedup_filter)
 logging.getLogger("aegis").addFilter(_dedup_filter)
+# B6 FIX: расширяем dedup на PatternML, orderbook и root (подавляем ×12 при hot-reload)
+logging.getLogger("aegis.pattern_ml").addFilter(_dedup_filter)
+logging.getLogger("core.orderbook_scorer").addFilter(_dedup_filter)
+logging.root.addFilter(_dedup_filter)  # ← ловит всё, включая не-aegis логгеры
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException, Request
 from fastapi.responses import JSONResponse
