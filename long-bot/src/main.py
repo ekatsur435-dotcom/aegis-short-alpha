@@ -470,7 +470,7 @@ async def lifespan(app: FastAPI):
         from database.trade_analytics import TradeAnalytics
         _db_path = os.getenv("SIGNALS_DB_PATH", "/opt/render/project/signals_long.db")
         state.signals_db      = get_signals_db(db_path=_db_path)
-        state.trade_analytics = TradeAnalytics(redis_client=state.redis)
+        state.trade_analytics = TradeAnalytics(redis_client=state.redis, bot_type="long")
         print("✅ SignalsDB + TradeAnalytics: подключены")
     except Exception as _e:
         print(f"⚠️ SignalsDB init error: {_e}")
@@ -608,6 +608,7 @@ async def lifespan(app: FastAPI):
                     exit_price=float(record.get("close_price", 0)),
                     pnl_percent=_pnl_pct, pnl_usd=_pnl_usd,
                     tp_level=_tp_lvl, timeframe="15m",
+                    bot_type="long",  # ✅ B8-FIX #3: изолируем long:trade_history
                 )
             except Exception:
                 pass

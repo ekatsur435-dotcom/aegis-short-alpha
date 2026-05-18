@@ -189,6 +189,9 @@ services:
       # Pre-pump detector (SHORT: тихая вершина + OI + перегретый funding → bypass z_gate)
       - key: EXTENDED_TP_SHORT
         value: "true"            # true = 6 TP уровней для трендовых паттернов (false = стандартные 4)
+      # PatternML — минимум сделок по паттерну для статистической значимости
+      - key: PATTERN_ML_MIN_TRADES
+        value: "3"               # Default=3 (бот новый, мало данных); рекомендуется 5+ после 100 сделок
       - key: ENABLE_PRE_PUMP_DETECTOR
         value: "true"
       - key: PRE_PUMP_ATR_SQUEEZE
@@ -386,6 +389,9 @@ services:
         value: "0"               # 0 = авто (= SCAN_INTERVAL)
       - key: EXTENDED_TP_LONG
         value: "true"            # true = 6 TP уровней для long-bot (false = стандартные 4)
+      # PatternML — минимум сделок по паттерну для статистической значимости
+      - key: PATTERN_ML_MIN_TRADES
+        value: "3"               # Default=3 (бот новый, мало данных); рекомендуется 5+ после 100 сделок
       # Pre-pump detector (LONG: тихое накопление + OI↑ + funding нейтральный → bypass z_gate)
       - key: ENABLE_PRE_PUMP_DETECTOR
         value: "true"
