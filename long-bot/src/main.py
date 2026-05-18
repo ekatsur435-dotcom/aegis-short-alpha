@@ -1781,7 +1781,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             reasons.extend(aegis_signal.reasons[:6])
         reasons.extend(_liq_opt_reasons)
 
-        return {
+        ret_dict = {
             "symbol":       symbol,
             "direction":    "long",
             "score":        round(final_score, 1),
@@ -1854,9 +1854,9 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
                     timeframe="15m",
                     score=int(final_score),
                     confidence=final_score / 100,
-                    entry_price=signal.get("entry_price", 0),
-                    stop_loss=signal.get("stop_loss", 0),
-                    take_profit=signal.get("take_profit_1", 0),
+                    entry_price=ret_dict.get("entry_price", 0),
+                    stop_loss=ret_dict.get("stop_loss", 0),
+                    take_profit=ret_dict.get("take_profit_1", 0),
                     reasons=", ".join(reasons[:8]),
                     extra={},
                 ))
@@ -1864,7 +1864,7 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
             except Exception as _sde:
                 print(f"[signals_db] save error {symbol}: {_sde}")
 
-        return signal
+        return ret_dict
 
     except Exception as e:
         print(f"Error scanning {symbol}: {e}")
