@@ -215,6 +215,9 @@ services:
         value: "7.0"             # 4H падение > X% + RSI<45 → блок (шортим дно). Также: 1H рост + 24H < -(X×1.5)%.
       - key: SHORT_DROP_BYPASS_MIN_SCORE
         value: "85"              # Исключение drop-фильтра для сигналов score >= X (BREAKOUT/WYCKOFF high-confidence).
+      # ─── WEEKLY SNR / OB / ZONE FILTERS ─────────────────────────────────────
+      - key: SHORT_BLOCK_WEEKLY_BULL_OB
+        value: "true"            # true = SHORT заблокирован если цена в Weekly Bullish OB (институциональная покупка).
 
   # ═══════════════════════════════════════════════════════════════════════
   # 🟢 AEGIS LONG ALPHA - Long Trading Bot

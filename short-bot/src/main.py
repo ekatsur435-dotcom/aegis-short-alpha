@@ -1270,16 +1270,41 @@ async def scan_symbol(symbol: str, cached_btc_1h: Optional[float] = None, verbos
         # Три условия полностью блокируют такие сигналы до ShortFilter/AEGIS.
         # ══════════════════════════════════════════════════════════════════════
 
-        # FIX #1 — DISCOUNT ZONE: цена ниже POC 4H = институционалы покупают здесь
+        # FIX #1 — DISCOUNT ZONE: цена ниже POC 4H/Weekly = институционалы покупают здесь
         # SHORT в DISCOUNT = торговля против умных денег. HARD BLOCK.
         _short_require_premium = os.getenv("SHORT_REQUIRE_PREMIUM", "true").lower() == "true"
-        if _short_require_premium and "discount" in _zone.lower():
-            if verbose:
-                print(
-                    f"{log_prefix} 🚫 [DISCOUNT BLOCK] zone={_zone!r} — "
-                    f"цена ниже POC 4H, институционалы покупают, SHORT запрещён"
-                )
-            return None
+        _zone_weekly = getattr(_ms_s, 'zone_weekly', '') or ''
+        _zone_monthly = getattr(_ms_s, 'zone_monthly', '') or ''
+        if _short_require_premium:
+            if "discount" in _zone.lower():
+                if verbose:
+                    print(
+                        f"{log_prefix} 🚫 [DISCOUNT BLOCK 4H] zone={_zone!r} — "
+                        f"цена ниже POC 4H, институционалы покупают, SHORT запрещён"
+                    )
+                return None
+            if "discount" in _zone_weekly.lower():
+                if verbose:
+                    print(
+                        f"{log_prefix} 🚫 [DISCOUNT BLOCK WEEKLY] zone_weekly={_zone_weekly!r} — "
+                        f"цена в WEEKLY DISCOUNT, институционалы набирают лонги, SHORT запрещён"
+                    )
+                return None
+
+        # FIX #1b — WEEKLY BULLISH OB: цена внутри недельного бычьего ордер-блока
+        # = институционалы покупают здесь на неделях, SHORT крайне опасен
+        _short_block_weekly_ob = os.getenv("SHORT_BLOCK_WEEKLY_BULL_OB", "true").lower() == "true"
+        if _short_block_weekly_ob and _ms_s:
+            _ob_bull_1w = getattr(_ms_s, 'ob_bullish_1w', None)
+            if _ob_bull_1w:
+                _ob_lo, _ob_hi = _ob_bull_1w
+                if _ob_lo > 0 and _ob_lo <= price <= _ob_hi * 1.01:
+                    if verbose:
+                        print(
+                            f"{log_prefix} 🚫 [WEEKLY BULL OB BLOCK] цена {price:.4f} внутри "
+                            f"Bullish OB Weekly [{_ob_lo:.4f}–{_ob_hi:.4f}] — SHORT запрещён"
+                        )
+                    return None
 
         # FIX #2 — RSI OVERSOLD: актив перепродан → V-отскок вероятнее продолжения
         # RSI < порог = КОНЕЦ дампа, не начало. Порог по умолчанию 30.
